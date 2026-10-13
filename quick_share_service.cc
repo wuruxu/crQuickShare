@@ -69,9 +69,11 @@ struct QuickShareService::Impl {
   base::FilePath destination;
   struct Request { Peer peer; std::vector<base::FilePath> paths; };
   std::optional<Request> request;
+  const bool receive_text;
+  std::vector<QuickShareService::ReceivedText> received_texts;
   base::TimeTicks visible_until;
   struct Session;
-  Impl(std::string n, base::FilePath d) : name(std::move(n)), destination(std::move(d)) {
+  Impl(std::string n, base::FilePath d, bool allow_text) : name(std::move(n)), destination(std::move(d)), receive_text(allow_text) {
     constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     for (int i = 0; i < 4; ++i) endpoint += alphabet[base::RandGenerator(36)];
     endpoint_info = MakeEndpointInfo(name);
@@ -93,7 +95,8 @@ struct QuickShareService::Impl {
     });
   }
   void Discover();
-  void Start(std::unique_ptr<TransportChannel> transport, std::optional<Request> outgoing);
+  void Start(std::unique_ptr<TransportChannel> transport, std::optional<Request> outgoing,
+             std::string initial_record = {});
 };
 
 // One session worker owns the transport, crypto context and file descriptors.
@@ -142,6 +145,8 @@ struct QuickShareService::Impl::Session {
     uint64_t file_index = 0;
   };
   std::map<int64_t, SentPayload> sent_payloads, sent_controls;
+  struct TextPayload { int64_t size = 0; std::string body; bool complete = false; bool ack_sent = false; };
+  std::map<int64_t, TextPayload> text_payloads;
   struct ChunkSequence {
     std::optional<bool> indexed;
     int64_t next = 0;
@@ -244,7 +249,7 @@ struct QuickShareService::Impl::Session {
   bool SupportsSafeDisconnect() const { return peer_disconnect_version >= 1; }
   int64_t NewId() {
     int64_t id;
-    do { id = PayloadId(); } while (received_payloads.contains(id) || byte_sizes.contains(id) || !local_ids.insert(id).second);
+    do { id = PayloadId(); } while (received_payloads.contains(id) || text_payloads.contains(id) || byte_sizes.contains(id) || !local_ids.insert(id).second);
     return id;
   }
   void ConfigureKeepalive(int interval_ms, int timeout_ms) {
@@ -629,6 +634,10 @@ struct QuickShareService::Impl::Session {
         if (!h.has_type() || (h.type() != Header::FILE && h.type() != Header::BYTES) ||
             !h.has_total_size() || h.total_size() < 0)
           return Fail("Invalid DATA payload header");
+        if (auto text = text_payloads.find(h.id()); text != text_payloads.end()) {
+          if (!accepted || h.type() != Header::BYTES || h.total_size() != text->second.size)
+            return Fail("Unexpected or changed text payload");
+        }
         if (h.type() == Header::FILE) {
           auto known = received_file_headers.find(h.id());
           if (!accepted || known == received_file_headers.end()) return Fail("Unexpected file payload");
@@ -702,6 +711,7 @@ struct QuickShareService::Impl::Session {
       bool completed_control = false;
       if (sent != sent_payloads.end()) limit = sent->second.offset;
       else if (received != received_payloads.end()) limit = received->second.first;
+      else if (auto text = text_payloads.find(h.id()); text != text_payloads.end()) limit = text->second.size;
       else if (control != sent_controls.end()) {
         limit = control->second.offset; completed_control = control->second.last_sent && control->second.retired;
       } else if (incoming_control != byte_sizes.end()) {
@@ -721,6 +731,30 @@ struct QuickShareService::Impl::Session {
         peer_cancelled = true; terminal_received = true; error = "Peer cancelled the transfer"; return false;
       }
       terminal_received = true; return Fail("Peer reported a payload error");
+    }
+    if (auto text = text_payloads.find(h.id()); text != text_payloads.end()) {
+      if (!accepted || p.packet_type() != nc::PayloadTransferFrame::DATA || h.type() != Header::BYTES)
+        return Fail("Unexpected text payload before approval");
+      auto& item = text->second;
+      if (!ValidateDataChunk(p, item.size, item.body.size(), item.complete)) return false;
+      if (item.complete) return true;
+      RetireSentControls();
+      const auto& chunk = p.payload_chunk();
+      item.body += chunk.body();
+      if (chunk.flags() & 1) {
+        if (!base::IsStringUTF8(item.body) || item.body.find('\0') != std::string::npos)
+          return Fail("Invalid UTF-8 text attachment");
+        item.complete = true;
+      }
+      owner.Update([&](Snapshot& s) {
+        s.transferred += chunk.body().size();
+        if (item.complete) ++s.completed_files;
+      });
+      if (item.complete && !std::ranges::all_of(text_payloads, [](const auto& entry) { return entry.second.complete; })) {
+        if (!Ack(h.id())) return false;
+        item.ack_sent = true;
+      }
+      return true;
     }
     if (finishing && batch_committed && p.packet_type() == nc::PayloadTransferFrame::DATA && h.type() == Header::FILE) {
       auto received = received_payloads.find(h.id());
@@ -889,19 +923,24 @@ struct QuickShareService::Impl::Session {
     if (status != qs::ConnectionResponseFrame::ACCEPT) terminal_sent = true;
     return true;
   }
-  struct File { int64_t id = 0, size = 0, offset = 0; uint64_t index = 0; std::string name, parent; base::File handle; bool complete = false; };
-  bool SendFiles(const Request& send_request) {
-    std::vector<File> files; int64_t total = 0;
-    if (send_request.paths.empty() || send_request.paths.size() > kMaxFiles) return Fail("Select between one and one hundred files or directories", Failure::kUnsupported);
-    auto intro = Sharing(qs::V1Frame::INTRODUCTION);
+  struct File { int64_t id = 0, size = 0, offset = 0; uint64_t index = 0; std::string name, parent; base::File handle; bool complete = false; base::Time last_modified; };
+  bool PrepareFiles(const Request& send_request, std::vector<File>& files, qs::Frame& intro, int64_t& total) {
+    Stage("source_preflight");
+    if (send_request.paths.empty() || send_request.paths.size() > kMaxFiles) return Fail("Select between 1 and 1024 files or directories", Failure::kUnsupported);
+    intro = Sharing(qs::V1Frame::INTRODUCTION);
     intro.mutable_v1()->mutable_introduction()->set_start_transfer(true);
     SourceSelection selection; StorageError storage_error;
     if (!storage->Collect(send_request.paths, [this] { return Active(); }, selection, storage_error))
       return storage_error.message.empty() ? false : Fail(storage_error.message, storage_error.failure);
     total = selection.total;
     for (auto& source : selection.files) {
+      if (!Active()) return false;
+      base::File::Info info;
+      if (!source.handle.GetInfo(&info) || info.is_directory || info.size != source.size)
+        return Fail("Source file changed during directory inspection", Failure::kSourceFile);
       File f; f.id = NewId(); f.index = files.size() + 1; f.size = source.size;
       f.name = std::move(source.name); f.parent = std::move(source.parent); f.handle = std::move(source.handle);
+      f.last_modified = info.last_modified;
       files.push_back(std::move(f));
     }
     for (const auto& f : files) {
@@ -913,10 +952,25 @@ struct QuickShareService::Impl::Session {
       payload.parent_folder = f.parent; payload.file_index = f.index;
       sent_payloads.emplace(f.id, std::move(payload));
     }
+    // Sharing messages are currently sent as a single encrypted BYTES record.
+    // Reserve space for the payload envelope, signature and encryption padding.
+    if (intro.ByteSizeLong() > kMaxRecord - 4096)
+      return Fail("Source metadata exceeds the transfer record limit", Failure::kUnsupported);
     LOG(INFO) << "crQuickShare: Source selection collected; files=" << files.size()
               << "; entries=" << selection.entries << "; files_with_parent="
               << std::count_if(files.begin(), files.end(), [](const File& f) { return !f.parent.empty(); });
     owner.Update([&](Snapshot& s) { s.total = total; for (auto& f : files) s.files.push_back(RelativeName(f.parent, f.name)); });
+    LOG(INFO) << "crQuickShare: Source preflight complete; session=" << diagnostic_session
+              << "; files=" << files.size() << "; total_bytes=" << total
+              << "; metadata_bytes=" << intro.ByteSizeLong();
+    return Active();
+  }
+  bool SourceUnchanged(File& file) {
+    base::File::Info info;
+    return (file.handle.GetInfo(&info) && !info.is_directory && info.size == file.size &&
+            info.last_modified == file.last_modified) || Fail("Source file changed after inspection", Failure::kSourceFile);
+  }
+  bool SendFiles(std::vector<File>& files, const qs::Frame& intro, int64_t total) {
     if (!Handshake(true) || !Pair()) return false;
     expected_sharing = qs::V1Frame::RESPONSE; offer_sent = true;
     response_deadline = base::TimeTicks::Now() + base::Seconds(60);
@@ -933,6 +987,7 @@ struct QuickShareService::Impl::Session {
     Stage("file_transfer");
     owner.PhaseChanged(Phase::kTransferring);
     for (auto& f : files) {
+      if (!Active() || !SourceUnchanged(f)) return false;
       owner.Update([&](Snapshot& s) {
         s.current_file = RelativeName(f.parent, f.name); s.current_file_index = f.index;
         s.current_file_transferred = 0; s.current_file_total = f.size;
@@ -945,7 +1000,9 @@ struct QuickShareService::Impl::Session {
         // Drain cancellation / acknowledgements between writes.
         for (int i = 0; i < 8; ++i) { nc::OfflineFrame frame; int r = Read(frame, 0); if (r < 0 || (r > 0 && !Control(frame))) return false; if (!r) break; }
       }
-      if (!Active() || !Chunk(f.id, Header::FILE, f.size, f.size, {}, true) || !Flush()) return SenderFinishedAfterClose();
+      if (!Active() || !SourceUnchanged(f)) return false;
+      f.handle.Close();
+      if (!Chunk(f.id, Header::FILE, f.size, f.size, {}, true) || !Flush()) return SenderFinishedAfterClose();
     }
     owner.PhaseChanged(Phase::kWaiting);
     Stage("delivery_confirmation");
@@ -984,11 +1041,89 @@ struct QuickShareService::Impl::Session {
     if (SupportsAck() && !all_acked) return Fail("Peer disconnected before acknowledging files");
     confirmed_delivery = all_acked; return true;
   }
+  bool ReceiveTexts(const qs::IntroductionFrame& offer) {
+    if (!owner.receive_text || offer.text_metadata_size() > 16 || offer.file_metadata_size() ||
+        offer.wifi_credentials_metadata_size() || offer.app_metadata_size() || offer.stream_metadata_size()) {
+      Response(qs::ConnectionResponseFrame::UNSUPPORTED_ATTACHMENT_TYPE);
+      return Fail("Unsupported mixed or text attachment batch", Failure::kUnsupported);
+    }
+    int64_t total = 0;
+    std::vector<int64_t> order;
+    bool urls_only = true;
+    for (const auto& metadata : offer.text_metadata()) {
+      // Text subtypes describe how a receiver could open the same BYTES body.
+      // Clipboard reception treats all known subtypes as plain text, including
+      // ADDRESS and PHONE_NUMBER, and never launches their associated handlers.
+      // An omitted type defaults to UNKNOWN and also uses UTF-8 validation.
+      const char* metadata_error = nullptr;
+      if (!metadata.has_payload_id()) metadata_error = "missing_payload_id";
+      else if (!metadata.has_size()) metadata_error = "missing_size";
+      else if (metadata.size() <= 0) metadata_error = "nonpositive_size";
+      else if (metadata.size() > int64_t(kMaxRecord) - total) metadata_error = "batch_size_limit";
+      else if (metadata.type() != qs::TextMetadata::UNKNOWN &&
+               metadata.type() != qs::TextMetadata::TEXT && metadata.type() != qs::TextMetadata::URL &&
+               metadata.type() != qs::TextMetadata::ADDRESS && metadata.type() != qs::TextMetadata::PHONE_NUMBER)
+        metadata_error = "unsupported_text_type";
+      else if (text_payloads.contains(metadata.payload_id()) || byte_sizes.contains(metadata.payload_id()) ||
+               sent_controls.contains(metadata.payload_id()) || local_ids.contains(metadata.payload_id()))
+        metadata_error = "payload_id_collision";
+      LOG(INFO) << "crQuickShare: Text attachment metadata; session=" << diagnostic_session
+                << "; index=" << order.size() << "; has_type=" << metadata.has_type()
+                << "; type=" << static_cast<int>(metadata.type())
+                << "; has_payload_id=" << metadata.has_payload_id()
+                << "; has_size=" << metadata.has_size() << "; size=" << metadata.size()
+                << "; result=" << (metadata_error ? metadata_error : "accepted");
+      if (metadata_error) {
+        Response(qs::ConnectionResponseFrame::UNSUPPORTED_ATTACHMENT_TYPE);
+        return Fail(std::string("Invalid text attachment metadata: ") + metadata_error, Failure::kUnsupported);
+      }
+      text_payloads.emplace(metadata.payload_id(), TextPayload{metadata.size(), {}, false});
+      order.push_back(metadata.payload_id()); total += metadata.size();
+      urls_only &= metadata.type() == qs::TextMetadata::URL;
+    }
+    offer_received = true; expected_sharing = qs::V1Frame::UNKNOWN_FRAME_TYPE;
+    owner.Update([&](Snapshot& s) {
+      s.total = total; s.text_count = order.size(); s.text_is_url = urls_only;
+    });
+    if (!Confirm()) return false;
+    accepted = true;
+    if (!Response(qs::ConnectionResponseFrame::ACCEPT) || !Flush()) return false;
+    Stage("text_transfer"); owner.PhaseChanged(Phase::kTransferring);
+    auto deadline = base::TimeTicks::Now() + base::Seconds(60);
+    auto complete = [&] { return std::ranges::all_of(text_payloads, [](const auto& item) { return item.second.complete; }); };
+    while (Active() && !complete() && base::TimeTicks::Now() < deadline) {
+      size_t before = 0;
+      for (const auto& [id, text] : text_payloads) before += text.body.size();
+      nc::OfflineFrame frame; int result = Read(frame);
+      if (result < 0 || (result > 0 && !Control(frame))) return false;
+      size_t after = 0;
+      for (const auto& [id, text] : text_payloads) after += text.body.size();
+      if (after > before) deadline = base::TimeTicks::Now() + base::Seconds(60);
+    }
+    if (!Active()) return false;
+    if (!complete()) { timed_out = true; return Fail("Text transfer stalled"); }
+    std::string content;
+    for (auto id : order) {
+      if (!content.empty()) content += '\n';
+      content += text_payloads.at(id).body;
+    }
+    {
+      std::lock_guard guard(owner.mutex);
+      if (owner.received_texts.size() >= 8) return Fail("Text delivery queue full", Failure::kStorage);
+      owner.received_texts.push_back({owner.state.session, std::move(content)});
+    }
+    batch_committed = true;
+    for (auto id : order) if (!text_payloads.at(id).ack_sent && !Ack(id)) break;
+    LOG(INFO) << "crQuickShare: Text batch received; session=" << diagnostic_session << "; attachments=" << order.size()
+              << "; total_bytes=" << total;
+    return true;
+  }
   bool ReceiveFiles() {
     if (!Handshake(false) || !Pair()) return false;
     qs::Frame intro;
     if (!AwaitSharing(intro, qs::V1Frame::INTRODUCTION) || !intro.v1().has_introduction()) return false;
     const auto& offer = intro.v1().introduction();
+    if (offer.text_metadata_size()) return ReceiveTexts(offer);
     if (offer.file_metadata_size() < 1 || offer.file_metadata_size() > int(kMaxFiles) || offer.text_metadata_size() || offer.wifi_credentials_metadata_size() || offer.app_metadata_size() || offer.stream_metadata_size()) { Response(qs::ConnectionResponseFrame::UNSUPPORTED_ATTACHMENT_TYPE); return Fail("Only file attachments are supported", Failure::kUnsupported); }
     std::map<int64_t, File> files; std::set<std::string> names, folders; int64_t total = 0;
     // Reserve every parent first, making file/directory collision handling
@@ -1090,17 +1225,18 @@ struct QuickShareService::Impl::Session {
     finish_deadline = base::TimeTicks::Now() + base::Seconds(2);
     if (!success && !terminal_sent && !terminal_received && !remote_closed) {
       if (accepted) {
-        auto notify = [&](int64_t id, int64_t size, int64_t offset) {
+        auto notify = [&](int64_t id, int64_t size, int64_t offset, Header::PayloadType type = Header::FILE) {
           auto f = Frame(nc::V1Frame::PAYLOAD_TRANSFER);
           auto* p = f.mutable_v1()->mutable_payload_transfer();
           p->set_packet_type(nc::PayloadTransferFrame::CONTROL);
-          auto* h = p->mutable_payload_header(); h->set_id(id); h->set_type(Header::FILE); h->set_total_size(size);
+          auto* h = p->mutable_payload_header(); h->set_id(id); h->set_type(type); h->set_total_size(size);
           auto* c = p->mutable_control_message(); c->set_offset(offset);
           c->set_event(owner.cancel || rejected ? nc::PayloadTransferFrame::ControlMessage::PAYLOAD_CANCELED : nc::PayloadTransferFrame::ControlMessage::PAYLOAD_ERROR);
           return Write(f);
         };
         for (const auto& [id, p] : sent_payloads) if (!p.acknowledged && !notify(id, p.size, p.offset)) break;
         for (const auto& [id, p] : received_payloads) if (!batch_committed && !notify(id, p.first, p.second)) break;
+        for (const auto& [id, text] : text_payloads) if (!batch_committed && !notify(id, text.size, text.body.size(), Header::BYTES)) break;
       }
       if (offer_received && !accepted && timed_out) Response(qs::ConnectionResponseFrame::TIMED_OUT);
       else SendSharing(Sharing(qs::V1Frame::CANCEL));
@@ -1131,46 +1267,76 @@ struct QuickShareService::Impl::Session {
   }
 
 };
-void QuickShareService::Impl::Start(std::unique_ptr<TransportChannel> transport, std::optional<Request> outgoing) {
+void QuickShareService::Impl::Start(std::unique_ptr<TransportChannel> transport, std::optional<Request> outgoing,
+                                  std::string initial_record) {
   if (session_thread.joinable()) session_thread.join();
   Update([&](Snapshot& s) {
     if (!outgoing) ++s.session;
     s.busy = true; s.incoming = !outgoing; s.phase = Phase::kConnecting;
     s.peer_name = outgoing ? outgoing->peer.name : std::string(); s.code.clear(); s.files.clear();
+    s.text_count = 0; s.text_is_url = false;
     s.peer_device_type = outgoing && !outgoing->peer.endpoint_info.empty() ?
         (static_cast<uint8_t>(outgoing->peer.endpoint_info[0]) >> 1) & 7 : 0;
     s.transferred = s.total = 0; s.diagnostic.clear(); s.received_directory.clear();
     s.failure = Failure::kNone;
     ResetProgress();
   });
-  session_thread = std::thread([this, transport = std::move(transport), outgoing = std::move(outgoing)]() mutable {
+  session_thread = std::thread([this, transport = std::move(transport), outgoing = std::move(outgoing),
+                                initial_record = std::move(initial_record)]() mutable {
     Session session(*this, std::move(transport));
+    session.buffer = std::move(initial_record);
     session.outgoing = outgoing.has_value();
-    session.Stage(outgoing ? "tcp_connect" : "tcp_accepted");
+    std::vector<Session::File> prepared_files;
+    qs::Frame prepared_intro;
+    int64_t prepared_total = 0;
+    const bool prepared = !outgoing || session.PrepareFiles(*outgoing, prepared_files, prepared_intro, prepared_total);
+    if (!outgoing) session.Stage("tcp_accepted");
     bool connected = session.channel != nullptr;
-    if (outgoing) {
+    if (outgoing && prepared && session.Active()) {
+      session.Stage("tcp_connect");
       LOG(INFO) << "crQuickShare: Selected discovery record; session=" << session.diagnostic_session
                 << "; cache_id=" << outgoing->peer.discovery_cache_id << "; interface=" << outgoing->peer.discovery_interface;
       connected = false;
-      auto addresses = outgoing->peer.alternate_addresses;
-      addresses.insert(addresses.begin(), outgoing->peer.address);
+      auto routes = outgoing->peer.routes;
+      // Refresh paths after potentially slow source preflight. Retain the
+      // selected identity; never substitute another device with the same name.
+      {
+        std::lock_guard guard(mutex);
+        const auto peer = std::ranges::find_if(state.peers, [&](const auto& candidate) {
+          return candidate.id == outgoing->peer.id && candidate.endpoint_info == outgoing->peer.endpoint_info &&
+                 candidate.port == outgoing->peer.port;
+        });
+        if (peer != state.peers.end() && !peer->routes.empty()) routes = peer->routes;
+      }
+      // Compatibility for callers without discovery route information only.
+      if (routes.empty()) {
+        routes.push_back({outgoing->peer.address, {}, 0});
+        for (const auto& ip : outgoing->peer.alternate_addresses)
+          if (ip != outgoing->peer.address && routes.size() < 32) routes.push_back({ip, {}, 0});
+      }
       auto until = base::TimeTicks::Now() + base::Seconds(10);
-      unsigned attempt = 0;
-      for (const auto& ip : addresses) {
+      size_t attempt = 0;
+      for (const auto& route : routes) {
         if (!session.Active() || base::TimeTicks::Now() >= until) break;
         ++attempt;
         const auto attempt_started = base::TimeTicks::Now();
         auto report_attempt = [&](const char* result_name, int system_error) {
           LOG(INFO) << "crQuickShare: TCP attempt; session=" << session.diagnostic_session
-                    << "; address_index=" << attempt << "; address_count=" << addresses.size()
+                    << "; address_index=" << attempt << "; address_count=" << routes.size()
+                    << "; target_ipv4=" << route.address << "; local_ipv4=" << route.local_address
+                    << "; interface=" << route.interface_index
+                    << "; routing=" << (route.interface_index ? "discovery_bound" : "system")
                     << "; port=" << outgoing->peer.port << "; result=" << result_name
                     << "; errno=" << system_error
                     << "; elapsed_ms=" << (base::TimeTicks::Now() - attempt_started).InMilliseconds();
         };
         report_attempt("started", 0);
-        const auto attempt_until = std::min(until, base::TimeTicks::Now() + base::Seconds(3));
-        auto result = ConnectTcpChannel(ip, outgoing->peer.port, attempt_until,
-            [&session] { return session.Active(); });
+        const auto remaining = until - base::TimeTicks::Now();
+        const auto budget = base::Milliseconds(std::clamp<int64_t>(
+            remaining.InMilliseconds() / static_cast<int64_t>(routes.size() - attempt + 1), 100, 3000));
+        const auto attempt_until = std::min(until, base::TimeTicks::Now() + budget);
+        auto result = ConnectTcpChannel(route.address, outgoing->peer.port, attempt_until,
+            [&session] { return session.Active(); }, route.local_address, route.interface_index);
         report_attempt(result.outcome, result.system_error);
         session.channel = std::move(result.channel);
         connected = session.channel != nullptr;
@@ -1178,7 +1344,7 @@ void QuickShareService::Impl::Start(std::unique_ptr<TransportChannel> transport,
       }
       if (!connected && session.Active()) session.Fail("Unable to connect to any advertised address", Failure::kConnection);
     }
-    bool success = connected && session.Active() && (outgoing ? session.SendFiles(*outgoing) : session.ReceiveFiles());
+    bool success = prepared && connected && session.Active() && (outgoing ? session.SendFiles(prepared_files, prepared_intro, prepared_total) : session.ReceiveFiles());
     // Closing the connection may encounter further frames or socket errors.
     // Preserve the transfer outcome so cleanup cannot hide the original cause.
     const std::string transfer_error = session.error;
@@ -1236,6 +1402,17 @@ void QuickShareService::Impl::Discover() {
     LOG(INFO) << "crQuickShare: Incoming connection not started; reason=" << reason
               << "; errno=" << system_error << "; cumulative_events=" << listener_events;
   };
+  struct PendingConnection {
+    std::unique_ptr<TransportChannel> channel;
+    std::string address, record;
+    base::TimeTicks deadline;
+    size_t expected_bytes = 4;
+  };
+  // Only the first framed connection request is read here. The session worker
+  // receives it unchanged and performs the normal handshake validation again.
+  std::vector<PendingConnection> pending;
+  constexpr size_t kMaxPendingConnections = 8;
+  std::array<char, kChunk> pending_bytes;
   while (!stop) {
     std::optional<Request> outgoing;
     {
@@ -1259,24 +1436,94 @@ void QuickShareService::Impl::Discover() {
     }
     auto peers = discovery->Peers();
     { std::lock_guard guard(mutex); if (state.peers != peers) { LOG(INFO) << "crQuickShare: Discovery list updated; previous_count=" << state.peers.size() << "; current_count=" << peers.size(); state.peers = std::move(peers); ++state.revision; } }
+    if (busy || !receiving || stop) pending.clear();
     auto incoming = listener->Accept(100);
     if (!incoming.channel) {
       if (incoming.error) listener_diagnostic(incoming.error, incoming.system_error);
-      continue;
+    } else if (!discovery->IsLocalAddress(incoming.address)) {
+      listener_diagnostic("nonlocal_source", 0);
+    } else if (!receiving || busy || stop) {
+      listener_diagnostic("receiving_disabled_or_busy", 0);
+    } else if (pending.size() >= kMaxPendingConnections) {
+      listener_diagnostic("prehandshake_capacity", 0);
+    } else {
+      pending.push_back({std::move(incoming.channel), std::move(incoming.address), {},
+                         base::TimeTicks::Now() + base::Seconds(15), 4});
     }
-    if (!discovery->IsLocalAddress(incoming.address)) { listener_diagnostic("nonlocal_source", 0); continue; }
-    {
-      std::lock_guard guard(mutex);
-      if (!receiving) { listener_diagnostic("receiving_disabled", 0); continue; }
-      bool expected = false;
-      if (!busy.compare_exchange_strong(expected, true)) { listener_diagnostic("busy", 0); continue; }
-      cancel = false; decision = 0;
+    for (auto it = pending.begin(); it != pending.end();) {
+      const char* discard = nullptr;
+      int system_error = 0;
+      bool complete = false;
+      if (stop || busy || !receiving) { pending.clear(); break; }
+      if (base::TimeTicks::Now() >= it->deadline) discard = "prehandshake_timeout";
+      else if (!discovery->IsLocalAddress(it->address)) discard = "prehandshake_network_changed";
+      else {
+        // At most one nonblocking read per candidate per discovery iteration.
+        // Never consume UKEY2 bytes that follow the initial frame.
+        const size_t remaining = std::min(pending_bytes.size(), it->expected_bytes - it->record.size());
+        const auto read = it->channel->Read(base::span(pending_bytes).first(remaining));
+        system_error = read.system_error;
+        if (read.status == TransportChannel::Status::kClosed)
+          discard = it->record.empty() ? "prehandshake_empty_close" : "prehandshake_truncated_request";
+        else if (read.status == TransportChannel::Status::kError) discard = "prehandshake_read_error";
+        else if (read.status == TransportChannel::Status::kOk) {
+          if (!read.bytes || read.bytes > remaining) discard = "prehandshake_invalid_read";
+          else {
+            it->record.append(pending_bytes.data(), read.bytes);
+            if (it->expected_bytes == 4 && it->record.size() == 4) {
+              uint32_t length = 0;
+              for (unsigned char byte : it->record) length = (length << 8) | byte;
+              if (!length || length > kMaxRecord) discard = "prehandshake_invalid_length";
+              else it->expected_bytes = size_t{4} + length;
+            }
+            complete = !discard && it->record.size() == it->expected_bytes;
+          }
+        }
+      }
+      if (complete) {
+        nc::OfflineFrame frame;
+        if (!frame.ParseFromString(it->record.substr(4)) || frame.version() != nc::OfflineFrame::V1 ||
+            !frame.has_v1() || frame.v1().type() != nc::V1Frame::CONNECTION_REQUEST ||
+            !frame.v1().has_connection_request()) discard = "prehandshake_invalid_request";
+        else {
+          const auto& connection = frame.v1().connection_request();
+          if (connection.endpoint_id().size() != 4 ||
+              EndpointName(connection.has_endpoint_info() ? connection.endpoint_info() : connection.endpoint_name()).empty())
+            discard = "prehandshake_invalid_endpoint";
+        }
+      }
+      if (discard) {
+        listener_diagnostic(discard, system_error);
+        it = pending.erase(it);
+        continue;
+      }
+      if (!complete) { ++it; continue; }
+      bool admitted = false;
+      {
+        std::lock_guard guard(mutex);
+        bool expected = false;
+        if (!stop && receiving && busy.compare_exchange_strong(expected, true)) {
+          cancel = false; decision = 0; admitted = true;
+        }
+      }
+      if (!admitted) { pending.clear(); break; }
+      auto channel = std::move(it->channel);
+      auto initial_record = std::move(it->record);
+      pending.clear();
+      LOG(INFO) << "crQuickShare: Incoming prehandshake accepted; request_bytes=" << initial_record.size();
+      Start(std::move(channel), std::nullopt, std::move(initial_record));
+      break;
     }
-    Start(std::move(incoming.channel), std::nullopt);
   }
 }
-QuickShareService::QuickShareService(std::string name, base::FilePath destination)
-    : impl_(std::make_unique<Impl>(std::move(name), std::move(destination))) {}
+QuickShareService::QuickShareService(std::string name, base::FilePath destination, bool receive_text)
+    : impl_(std::make_unique<Impl>(std::move(name), std::move(destination), receive_text)) {}
+std::vector<QuickShareService::ReceivedText> QuickShareService::TakeReceivedTexts() {
+  std::lock_guard guard(impl_->mutex);
+  std::vector<ReceivedText> result;
+  result.swap(impl_->received_texts);
+  return result;
+}
 QuickShareService::~QuickShareService() = default;
 Snapshot QuickShareService::GetSnapshot() const {
   std::lock_guard guard(impl_->mutex);
@@ -1323,19 +1570,32 @@ bool QuickShareService::StopReceivingIfIdle() {
 bool QuickShareService::Send(const Peer& peer, std::vector<base::FilePath> paths) {
   std::lock_guard guard(impl_->mutex);
   if (peer.ble_only || peer.address.empty() || !peer.port || impl_->busy || paths.empty() || paths.size() > kMaxFiles || !impl_->state.available) return false;
-  auto it = std::find(impl_->state.peers.begin(), impl_->state.peers.end(), peer);
+  auto it = std::ranges::find_if(impl_->state.peers, [&](const Peer& candidate) {
+    return candidate.id == peer.id && candidate.endpoint_info == peer.endpoint_info &&
+           candidate.address == peer.address && candidate.port == peer.port;
+  });
   if (it == impl_->state.peers.end()) return false;
+  Peer selected = *it;
+  if (selected.name.empty()) {
+    const auto& info = selected.endpoint_info;
+    const auto& public_info = peer.public_name_info;
+    const auto public_name = EndpointName(public_info);
+    if (info.size() < 17 || public_info.size() < 17 || public_name.empty() ||
+        info.compare(1, 16, public_info, 1, 16) != 0 ||
+        ((uint8_t(info[0]) ^ uint8_t(public_info[0])) & 0xef) != 0) return false;
+    selected.name = public_name;
+  }
   bool expected = false; if (!impl_->busy.compare_exchange_strong(expected, true)) return false;
   impl_->cancel = false; impl_->decision = 0;
   ++impl_->state.session;
-  impl_->state.incoming = false; impl_->state.peer_name = peer.name;
+  impl_->state.incoming = false; impl_->state.peer_name = selected.name;
   impl_->state.peer_device_type = peer.endpoint_info.empty() ? 0 : (static_cast<uint8_t>(peer.endpoint_info[0]) >> 1) & 7;
   impl_->state.code.clear(); impl_->state.files.clear();
   impl_->state.transferred = impl_->state.total = 0; impl_->state.diagnostic.clear();
   impl_->state.failure = Failure::kNone;
   impl_->ResetProgress();
   impl_->state.busy = true; impl_->state.phase = Phase::kConnecting; ++impl_->state.revision;
-  impl_->request = Impl::Request{peer, std::move(paths)}; return true;
+  impl_->request = Impl::Request{std::move(selected), std::move(paths)}; return true;
 }
 void QuickShareService::Confirm(bool accept) {
   std::lock_guard guard(impl_->mutex);

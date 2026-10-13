@@ -8,7 +8,7 @@
 <translation id="8181876038280848864">在區域網絡內分享檔案，無需登入 Google。</translation>
 <translation id="2804694785588298928">接收 10 分鐘</translation>
 <translation id="8235434987148291431">停止接收</translation>
-<translation id="4677490628742467789">選擇檔案（最多 100 個）</translation>
+<translation id="6720792508518440468">選擇檔案（最多 1024 個）</translation>
 <translation id="7074670349438858233">對附近裝置隱藏</translation>
 <translation id="1136534526719901357">在此網絡中對所有人顯示，最長 10 分鐘</translation>
 <translation id="953692523250483872">未選擇檔案</translation>
@@ -48,7 +48,7 @@
   <translation id="6810075817102686774">已傳輸檔案</translation>
   <translation id="7962960561507616835">傳輸速度</translation>
   <translation id="4816292591240970283">剩餘時間（分:秒）</translation>
-<translation id="3181950488593258710">資料夾會保留目錄結構，空資料夾將略過。每次最多傳輸 100 個檔案，包括資料夾內的檔案。 接收端可能採用不同的目錄處理方式。</translation>
+<translation id="1431933172646212969">資料夾會保留目錄結構，空資料夾將略過。每次最多傳輸 1024 個檔案，包括資料夾內的檔案。 接收端可能採用不同的目錄處理方式。</translation>
 <translation id="4532845899244822526">選擇資料夾</translation>
 <translation id="9186448452346591728">已選取 <ph name="COUNT"/> 個項目</translation>
 </translationbundle>

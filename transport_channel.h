@@ -42,9 +42,14 @@ struct ChannelConnectResult {
   int system_error = 0;
 };
 // One IPv4 attempt. The caller owns address fallback and overall time budget.
+// An explicit route requires both source IPv4 and interface index. Failure to
+// bind it is reported, never silently retried with system routing. Empty route
+// preserves system routing for callers without discovery information.
 // active is called synchronously on the worker, at most 100 ms between polls.
 ChannelConnectResult ConnectTcpChannel(const std::string& address, uint16_t port,
                                       base::TimeTicks deadline,
-                                      const std::function<bool()>& active);
+                                      const std::function<bool()>& active,
+                                      const std::string& local_address = {},
+                                      unsigned interface_index = 0);
 }  // namespace crquickshare
 #endif

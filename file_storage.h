@@ -14,7 +14,7 @@
 #include "base/files/file_path.h"
 #include "crQuickShare/quick_share_service.h"
 namespace crquickshare {
-inline constexpr size_t kMaxTransferFiles = 100;
+inline constexpr size_t kMaxTransferFiles = 1024;
 inline constexpr int64_t kMaxTransferBytes = int64_t{1} << 40;
 // Protocol-relative paths, independent of the host path separator.
 bool SafeTransferName(const std::string& name);

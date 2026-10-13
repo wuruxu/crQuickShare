@@ -8,7 +8,7 @@
 <translation id="8181876038280848864">Partagez des fichiers sur votre réseau local, sans connexion Google.</translation>
 <translation id="2804694785588298928">Recevoir pendant 10 minutes</translation>
 <translation id="8235434987148291431">Arrêter la réception</translation>
-<translation id="4677490628742467789">Choisir des fichiers (100 maximum)</translation>
+<translation id="6720792508518440468">Choisir des fichiers (1024 maximum)</translation>
 <translation id="7074670349438858233">Masqué pour les appareils à proximité</translation>
 <translation id="1136534526719901357">Visible par tous sur ce réseau pendant 10 minutes au maximum</translation>
 <translation id="953692523250483872">Aucun fichier sélectionné</translation>
@@ -48,7 +48,7 @@
   <translation id="6810075817102686774">Fichiers transférés</translation>
   <translation id="7962960561507616835">Vitesse de transfert</translation>
   <translation id="4816292591240970283">Temps restant (min:s)</translation>
-<translation id="3181950488593258710">La structure des dossiers est conservée. Les dossiers vides sont ignorés. Jusqu’à 100 fichiers par transfert, y compris ceux des dossiers. Le destinataire peut traiter les dossiers différemment.</translation>
+<translation id="1431933172646212969">La structure des dossiers est conservée. Les dossiers vides sont ignorés. Jusqu’à 1024 fichiers par transfert, y compris ceux des dossiers. Le destinataire peut traiter les dossiers différemment.</translation>
 <translation id="4532845899244822526">Choisir un dossier</translation>
 <translation id="9186448452346591728"><ph name="COUNT"/> élément(s) sélectionné(s)</translation>
 </translationbundle>

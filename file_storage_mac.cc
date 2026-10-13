@@ -74,7 +74,7 @@ bool CollectFiles(base::File handle, const std::string& leaf, const std::string&
     }
     if (!S_ISREG(st.st_mode) || st.st_size < 0 || st.st_size > kMaxTotal - total)
       return StorageFail(error, "Unreadable, unsupported or oversized source file", Failure::kSourceFile);
-    if (files.size() >= kMaxFiles) return StorageFail(error, "Directory selection exceeds one hundred files", Failure::kUnsupported);
+    if (files.size() >= kMaxFiles) return StorageFail(error, "Directory selection exceeds 1024 files", Failure::kUnsupported);
     SourceFile f; f.size = st.st_size; f.name = leaf; f.parent = parent;
     f.handle = std::move(handle); total += f.size;
     files.push_back(std::move(f));
@@ -184,7 +184,7 @@ bool MacFileStorage::Collect(const std::vector<base::FilePath>& paths, const std
                               SourceSelection& selection, StorageError& error) {
   selection = {}; error = {};
   if (paths.empty() || paths.size() > kMaxFiles)
-    return StorageFail(error, "Select between one and one hundred files or directories", Failure::kUnsupported);
+    return StorageFail(error, "Select between 1 and 1024 files or directories", Failure::kUnsupported);
   SourceSelection collected;
   std::set<std::string> roots;
   for (const auto& path : paths) {

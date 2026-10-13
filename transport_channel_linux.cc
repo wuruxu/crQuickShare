@@ -4,6 +4,8 @@
 #include "crQuickShare/connection_listener.h"
 #include "base/files/scoped_file.h"
 #include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -65,13 +67,37 @@ std::unique_ptr<TransportChannel> AdoptTcpChannel(base::ScopedFD socket) {
 }
 ChannelConnectResult ConnectTcpChannel(const std::string& ip, uint16_t port,
                                       base::TimeTicks deadline,
-                                      const std::function<bool()>& active) {
+                                      const std::function<bool()>& active,
+                                      const std::string& local_address, unsigned interface_index) {
   if (!active()) return {nullptr, "cancelled", 0};
   if (base::TimeTicks::Now() >= deadline) return {nullptr, "timed_out", 0};
   base::ScopedFD socket(::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
   if (!socket.is_valid()) return {nullptr, "socket_failed", errno};
   sockaddr_in address{}; address.sin_family = AF_INET; address.sin_port = htons(port);
   if (inet_pton(AF_INET, ip.c_str(), &address.sin_addr) != 1) return {nullptr, "invalid_address", 0};
+  if (interface_index || !local_address.empty()) {
+    sockaddr_in source{}; source.sin_family = AF_INET;
+    if (!interface_index || inet_pton(AF_INET, local_address.c_str(), &source.sin_addr) != 1)
+      return {nullptr, "invalid_source_route", 0};
+    ifaddrs* raw = nullptr;
+    if (getifaddrs(&raw)) return {nullptr, "interface_check_failed", errno};
+    bool present = false;
+    for (auto* link = raw; link; link = link->ifa_next) {
+      if (link->ifa_addr && link->ifa_netmask && link->ifa_addr->sa_family == AF_INET && (link->ifa_flags & IFF_UP) &&
+          if_nametoindex(link->ifa_name) == interface_index &&
+          reinterpret_cast<const sockaddr_in*>(link->ifa_addr)->sin_addr.s_addr == source.sin_addr.s_addr &&
+          ((address.sin_addr.s_addr ^ source.sin_addr.s_addr) &
+           reinterpret_cast<const sockaddr_in*>(link->ifa_netmask)->sin_addr.s_addr) == 0)
+        present = true;
+    }
+    freeifaddrs(raw);
+    if (!present) return {nullptr, "source_route_unavailable", 0};
+    const uint32_t index = htonl(interface_index);
+    if (setsockopt(socket.get(), IPPROTO_IP, IP_UNICAST_IF, &index, sizeof(index)))
+      return {nullptr, "interface_bind_failed", errno};
+    if (bind(socket.get(), reinterpret_cast<sockaddr*>(&source), sizeof(source)))
+      return {nullptr, "source_bind_failed", errno};
+  }
   bool connected = connect(socket.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0;
   if (!connected && errno != EINPROGRESS) return {nullptr, "connect_failed", errno};
   while (!connected && active() && base::TimeTicks::Now() < deadline) {

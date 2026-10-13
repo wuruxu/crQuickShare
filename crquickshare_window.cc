@@ -17,6 +17,7 @@
 #include "base/timer/timer.h"
 #include "crQuickShare/grit/crquickshare_strings.h"
 #include "crQuickShare/quick_share_service.h"
+#include "crQuickShare/file_storage.h"
 #include "crQuickShare/ble_wakeup.h"
 #include "crQuickShare/ble_discovery.h"
 #include "base/logging.h"
@@ -229,7 +230,7 @@ class ShareView : public views::View, public ui::SelectFileDialog::Listener {
         auto* button = peers_->AddChildView(std::make_unique<views::MdTextButton>(base::BindRepeating(&ShareView::Send, base::Unretained(this), peer), (peer.name.empty() ? Text(IDS_CQS_BLE_DEVICE) : base::UTF8ToUTF16(peer.name)) + u"  ·  " + (peer.ble_only ? Text(IDS_CQS_BLE_ONLY) : base::UTF8ToUTF16(peer.address))));
         auto tooltip = Text(peer.ble_only ? IDS_CQS_BLE_HINT : IDS_CQS_SEND);
         if (!peer.bluetooth_address.empty()) tooltip += u"\n" + base::UTF8ToUTF16(peer.bluetooth_address);
-        button->SetTooltipText(tooltip); button->SetEnabled(!peer.ble_only && !s.busy && !paths_.empty() && paths_.size() <= 100);
+        button->SetTooltipText(tooltip); button->SetEnabled(!peer.ble_only && !s.busy && !paths_.empty() && paths_.size() <= kMaxTransferFiles);
       }
       peers_->InvalidateLayout();
     }

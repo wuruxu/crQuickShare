@@ -860,6 +860,12 @@ std::vector<Peer> BleDiscovery::MergeWithLan(std::vector<Peer> peers) const {
     const size_t limit = std::min(candidates.size(), size_t{16});
     LOG(INFO) << "crQuickShare: BLE association snapshot; records=" << candidates.size()
               << "; logged=" << limit << "; lan_peers=" << peers.size();
+    for (size_t i = 0; i < std::min(peers.size(), size_t{16}); ++i) {
+      const auto& lan = peers[i];
+      LOG(INFO) << "crQuickShare: LAN association record; cache_id=" << lan.discovery_cache_id
+                << "; interface=" << lan.discovery_interface << "; endpoint_id=" << base::HexEncode(lan.id)
+                << "; lan_ipv4=" << lan.address << "; port=" << lan.port << "; named=" << !lan.name.empty();
+    }
     for (size_t i = 0; i < limit; ++i) {
       const auto& item = candidates[i];
       const auto& peer = item.peer;
@@ -871,6 +877,21 @@ std::vector<Peer> BleDiscovery::MergeWithLan(std::vector<Peer> peers) const {
                     !item.system_name.empty() ? "bluez" : "none")
                 << "; age_ms=" << (now - item.seen).InMilliseconds()
                 << "; lan_match=" << std::ranges::any_of(peers, [&](const Peer& lan) { return SameEndpoint(lan, peer); });
+      size_t lan_logged = 0;
+      for (const auto& lan : peers) {
+        if (lan_logged >= 16) break;
+        const bool same_id = lan.id == peer.id;
+        const bool same_key = SameDiscoveryKey(lan, peer);
+        if (!same_id && !same_key) continue;
+        ++lan_logged;
+        LOG(INFO) << "crQuickShare: BLE LAN association; ble_index=" << i
+                  << "; cache_id=" << lan.discovery_cache_id << "; interface=" << lan.discovery_interface
+                  << "; lan_ipv4=" << lan.address << "; port=" << lan.port
+                  << "; same_endpoint_id=" << same_id << "; same_discovery_key=" << same_key
+                  << "; same_header=" << (((uint8_t(lan.endpoint_info[0]) ^ uint8_t(peer.endpoint_info[0])) & 0xef) == 0)
+                  << "; lan_named=" << !lan.name.empty() << "; ble_named=" << !EndpointName(peer.endpoint_info).empty()
+                  << "; merge=" << SameEndpoint(lan, peer);
+      }
       for (size_t j = 0; j < i; ++j) {
         const auto& other = candidates[j];
         const auto& name = peer.name.empty() ? item.system_name : peer.name;
@@ -885,6 +906,18 @@ std::vector<Peer> BleDiscovery::MergeWithLan(std::vector<Peer> peers) const {
                   << "; same_header=" << (peer.endpoint_info[0] == other.peer.endpoint_info[0])
                   << "; merge=" << SameEndpoint(peer, other.peer);
       }
+    }
+  }
+  for (auto& lan : peers) {
+    if (!lan.name.empty()) continue;
+    for (const auto& item : candidates) {
+      if (!SameEndpoint(lan, item.peer)) continue;
+      const auto public_name = EndpointName(item.peer.endpoint_info);
+      if (public_name.empty()) continue;
+      lan.name = public_name;
+      lan.public_name_info = item.peer.endpoint_info;
+      lan.bluetooth_address = item.peer.bluetooth_address;
+      break;
     }
   }
   std::vector<Peer> nearby;
@@ -903,6 +936,9 @@ std::vector<Peer> BleDiscovery::MergeWithLan(std::vector<Peer> peers) const {
   std::ranges::sort(nearby, [](const Peer& a, const Peer& b) {
     return std::tie(a.id, a.endpoint_info) < std::tie(b.id, b.endpoint_info);
   });
+  // Anonymous LAN candidates remain in the service snapshot for association,
+  // but never appear as selectable devices without a matching public name.
+  std::erase_if(peers, [](const Peer& peer) { return peer.name.empty(); });
   peers.insert(peers.end(), nearby.begin(), nearby.end());
   // DCT cannot establish SameEndpoint with FEF3/LAN. It deliberately bypasses
   // that identity merge, and carries no fabricated Sharing endpoint_info.

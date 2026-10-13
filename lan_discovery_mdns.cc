@@ -53,6 +53,16 @@ std::string AddressText(uint32_t address) {
   return base::NumberToString(address >> 24) + "." + base::NumberToString((address >> 16) & 255) + "." +
       base::NumberToString((address >> 8) & 255) + "." + base::NumberToString(address & 255);
 }
+const char* EndpointNameStatus(const std::string& info) {
+  if (info.empty()) return "missing_or_invalid_endpoint_info";
+  if ((uint8_t(info[0]) >> 5) > 1) return "unsupported_version";
+  if (info[0] & 0x10) return "not_public";
+  if (info.size() < 18) return "missing_name_length";
+  const size_t length = uint8_t(info[17]);
+  if (!length) return "empty_name";
+  if (info.size() < 18 + length) return "truncated_name";
+  return EndpointName(info).empty() ? "invalid_name_encoding_or_characters" : "available";
+}
 std::optional<uint32_t> ParseAddress(std::string_view text) {
   const auto parts = base::SplitStringPiece(text, ".", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
   if (parts.size() != 4) return std::nullopt;
@@ -155,6 +165,8 @@ class MdnsDiscovery final : public LanDiscovery {
   base::TimeTicks visibility_log_window_;
   unsigned visibility_logs_ = 0;
   uint64_t visibility_logs_suppressed_ = 0;
+  uint64_t unchanged_network_notifications_ = 0;
+  base::TimeTicks next_notification_refresh_;
   std::vector<PendingReply> replies_;
   std::string endpoint_, info_, instance_, host_;
   uint16_t port_;
@@ -205,20 +217,50 @@ void MdnsDiscovery::RefreshNetwork(base::TimeTicks now) {
   next_network_check_ = now + base::Seconds(3);
   auto current = network_->Interfaces();
   if (!current) return;
-  if (*current == interfaces_ && !notified && !resumed && (ready() || current->empty())) return;
+  if (*current == interfaces_ && !resumed && (ready() || current->empty())) {
+    if (notified) {
+      // A route notification need not change the multicast interfaces.
+      ++unchanged_network_notifications_;
+      if (now >= next_notification_refresh_) {
+        next_notification_refresh_ = now + base::Seconds(1);
+        next_query_ = {}; query_interval_ = 1;
+        RefreshAdvertisement();
+      }
+    }
+    return;
+  }
+  std::set<unsigned> affected;
+  for (const auto& link : interfaces_)
+    if (std::ranges::find(*current, link) == current->end()) affected.insert(link.index);
+  for (const auto& link : *current)
+    if (std::ranges::find(interfaces_, link) == interfaces_.end()) affected.insert(link.index);
+  const bool invalidate_all = resumed || !ready();
   const char* reset_reason = resumed ? "network_resume" : *current != interfaces_ ? "network_changed" :
       notified ? "network_notification" : "network_reopened";
-  for (const auto& [key, observed] : observed_services_) if (AllowVisibilityLog(now))
+  for (const auto& [key, observed] : observed_services_) if ((invalidate_all || affected.contains(std::get<0>(key))) && AllowVisibilityLog(now))
     LOG(INFO) << "crQuickShare: mDNS service unavailable; cache_id=" << observed.id
               << "; interface=" << std::get<0>(key) << "; record=NETWORK; reason=" << reset_reason;
-  observed_services_.clear();
-  for (const auto& [index, publication] : publications_) if (publication.established) Announce(index, 0);
+  auto invalidated = [&](const auto& pair) { return invalidate_all || affected.contains(std::get<0>(pair.first)); };
+  std::erase_if(observed_services_, invalidated);
+  for (const auto& [index, publication] : publications_)
+    if (publication.established && (invalidate_all || affected.contains(index))) Announce(index, 0);
+  auto previous_publications = publications_;
   network_->Close(); interfaces_ = std::move(*current);
-  cache_.clear(); resolutions_.clear(); recent_queries_.clear();
+  std::erase_if(cache_, invalidated);
+  std::erase_if(resolutions_, invalidated);
+  std::erase_if(recent_queries_, invalidated);
   network_->Open(interfaces_); ResetPublications(now);
+  if (ready() && !invalidate_all) for (const auto& [index, publication] : previous_publications) {
+    if (!affected.contains(index) && publications_.contains(index)) publications_[index] = publication;
+  }
   next_query_ = {}; query_interval_ = 1;
   LOG(INFO) << "crQuickShare: Network discovery reset; ready=" << ready() << "; interface_addresses=" << interfaces_.size()
-            << "; resumed=" << resumed << "; notified=" << notified;
+            << "; resumed=" << resumed << "; notified=" << notified
+            << "; invalidated_all=" << invalidate_all << "; affected_interfaces=" << affected.size();
+  for (const auto& link : interfaces_)
+    LOG(INFO) << "crQuickShare: mDNS interface; interface=" << link.index
+              << "; local_ipv4=" << AddressText(link.address) << "; netmask=" << AddressText(link.mask)
+              << "; subnet=" << AddressText(link.address & link.mask);
 }
 std::vector<Record> MdnsDiscovery::OwnRecords(unsigned index) const {
   std::vector<Record> records;
@@ -436,7 +478,12 @@ void MdnsDiscovery::Cache(const std::vector<Record>& records, unsigned index, ba
     } else if (record.type == 1) {
       if (!base::EndsWith(name, ".local") || record.data.size() != 4) continue;
       const uint32_t address = (uint32_t(Get16(record.data, 0)) << 16) | Get16(record.data, 2);
-      if (!Local(address, index)) continue;
+      if (!Local(address, index)) {
+        if (AllowVisibilityLog(now))
+          LOG(INFO) << "crQuickShare: mDNS address ignored; interface=" << index
+                    << "; advertised_ipv4=" << AddressText(address) << "; reason=not_local_subnet";
+        continue;
+      }
     } else {
       continue;
     }
@@ -490,7 +537,13 @@ const Cached* MdnsDiscovery::Select(unsigned index, std::string_view name, uint1
   return selected;
 }
 void MdnsDiscovery::Read(const MdnsDatagram& datagram, base::TimeTicks now) {
-  if (!Local(datagram.source.address, datagram.interface_index)) return;
+  if (!Local(datagram.source.address, datagram.interface_index)) {
+    if (AllowVisibilityLog(now))
+      LOG(INFO) << "crQuickShare: mDNS packet ignored; interface=" << datagram.interface_index
+                << "; source_ipv4=" << AddressText(datagram.source.address)
+                << "; source_port=" << datagram.source.port << "; reason=not_local_subnet";
+    return;
+  }
   const auto packet = mdns::Parse(datagram.bytes);
   if (!packet) { ++malformed_; return; }
   if ((packet->flags & 0x8000) && datagram.source.port != 5353) return;
@@ -641,9 +694,22 @@ void MdnsDiscovery::MaintainCache(base::TimeTicks now) {
         const bool named = !EndpointName(info).empty();
         const char* reason = !srv ? "missing_srv" : !txt ? "missing_txt" :
             !Get16(srv->record.data, 4) ? "zero_port" : !named ? "name_unavailable" : !address ? "missing_ipv4" : "ready";
+        std::string addresses;
+        if (srv) {
+          const auto found = cache_.find(Key(index, srv->record.target, 1));
+          if (found != cache_.end()) for (const auto& entry : found->second) {
+            if (!entry.life.Valid(now) || entry.record.data.size() != 4) continue;
+            if (!addresses.empty()) addresses += ',';
+            addresses += AddressText((uint32_t(Get16(entry.record.data, 0)) << 16) | Get16(entry.record.data, 2));
+          }
+        }
         LOG(INFO) << "crQuickShare: mDNS service diagnostics; cache_id=" << resolution.id << "; interface=" << index
                   << "; reason=" << reason << "; srv_live=" << bool(srv) << "; txt_live=" << bool(txt)
-                  << "; ipv4_live=" << address << "; info_bytes=" << info.size();
+                  << "; ipv4_live=" << address << "; info_bytes=" << info.size()
+                  << "; advertised_ipv4=" << (addresses.empty() ? "none" : addresses)
+                  << "; service_port=" << (srv ? Get16(srv->record.data, 4) : 0)
+                  << "; name_status=" << EndpointNameStatus(info)
+                  << "; endpoint_id=" << base::HexEncode(Endpoint(record.record.target));
       }
       if (now < resolution.due) continue;
       if (srv && txt && address) { resolution.interval = 1; resolution.due = now + base::Seconds(1); continue; }
@@ -671,7 +737,7 @@ std::vector<Peer> MdnsDiscovery::Peers() const {
       if (!port) continue;
       const auto info = EndpointInfo(txt->record);
       const auto name = EndpointName(info);
-      if (name.empty()) continue;
+      if (name.empty() && (info.size() < 17 || (uint8_t(info[0]) >> 5) > 1 || !(info[0] & 0x10))) continue;
       const auto addresses = cache_.find(Key(index, srv->record.target, 1));
       if (addresses == cache_.end()) continue;
       for (const auto& address : addresses->second) {
@@ -681,6 +747,7 @@ std::vector<Peer> MdnsDiscovery::Peers() const {
         const auto existing = std::ranges::find_if(peers, [&](const auto& peer) {
           return peer.id == endpoint && peer.endpoint_info == info && peer.port == port;
         });
+        const size_t peer_index = existing - peers.begin();
         if (existing == peers.end()) {
           Peer peer; peer.id = endpoint; peer.name = name; peer.endpoint_info = info; peer.address = ip; peer.port = port;
           peer.discovery_interface = index;
@@ -689,6 +756,14 @@ std::vector<Peer> MdnsDiscovery::Peers() const {
           peers.push_back(std::move(peer));
         } else if (existing->address != ip && std::ranges::find(existing->alternate_addresses, ip) == existing->alternate_addresses.end()) {
           existing->alternate_addresses.push_back(ip);
+        }
+        auto& peer = peers[peer_index];
+        const auto numeric_ip = ParseAddress(ip);
+        for (const auto& link : interfaces_) {
+          if (link.index != index || !numeric_ip || (*numeric_ip & link.mask) != (link.address & link.mask)) continue;
+          LanRoute route{ip, AddressText(link.address), index};
+          if (peer.routes.size() < 32 && std::ranges::find(peer.routes, route) == peer.routes.end())
+            peer.routes.push_back(std::move(route));
         }
       }
     }
@@ -723,6 +798,8 @@ void MdnsDiscovery::Tick(bool visible) {
   }
   if (now >= next_diagnostics_) {
     next_diagnostics_ = now + base::Seconds(30);
+    const auto candidates = Peers();
+    const auto named = std::ranges::count_if(candidates, [](const Peer& peer) { return !peer.name.empty(); });
     size_t established = 0;
     for (const auto& [index, publication] : publications_) established += publication.established;
     LOG(INFO) << "crQuickShare: mDNS summary; counters=cumulative; queries_sent=" << queries_
@@ -730,7 +807,8 @@ void MdnsDiscovery::Tick(bool visible) {
               << "; established_interfaces=" << established << "; announcement_packets=" << announcements_
               << "; known_answers_suppressed=" << suppressed_ << "; cached_rrsets=" << cache_.size()
               << "; visibility_logs_suppressed=" << visibility_logs_suppressed_
-              << "; visible_peers=" << Peers().size() << "; send_errors=" << send_errors_ << "; receive_errors=" << receive_errors_;
+              << "; unchanged_network_notifications=" << unchanged_network_notifications_
+              << "; lan_candidates=" << candidates.size() << "; visible_peers=" << named << "; send_errors=" << send_errors_ << "; receive_errors=" << receive_errors_;
   }
 }
 }  // namespace

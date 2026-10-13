@@ -64,13 +64,36 @@ std::unique_ptr<TransportChannel> AdoptTcpChannel(platform::Socket socket) {
 }
 ChannelConnectResult ConnectTcpChannel(const std::string& ip, uint16_t port,
                                       base::TimeTicks deadline,
-                                      const std::function<bool()>& active) {
+                                      const std::function<bool()>& active,
+                                      const std::string& local_address, unsigned interface_index) {
   if (!active()) return {nullptr, "cancelled", 0};
   if (base::TimeTicks::Now() >= deadline) return {nullptr, "timed_out", 0};
   auto socket = platform::Open(SOCK_STREAM);
   if (!socket.is_valid()) return {nullptr, "socket_failed", platform::Error()};
   sockaddr_in address{}; address.sin_family = AF_INET; address.sin_port = htons(port);
   if (inet_pton(AF_INET, ip.c_str(), &address.sin_addr) != 1) return {nullptr, "invalid_address", 0};
+  if (interface_index || !local_address.empty()) {
+    sockaddr_in source{}; source.sin_family = AF_INET;
+    if (!interface_index || inet_pton(AF_INET, local_address.c_str(), &source.sin_addr) != 1)
+      return {nullptr, "invalid_source_route", 0};
+    const auto links = platform::Interfaces();
+    if (!links) return {nullptr, "interface_check_failed", platform::Error()};
+    if (std::ranges::none_of(*links, [&](const auto& link) {
+          return link.index == interface_index && link.address.s_addr == source.sin_addr.s_addr &&
+                 ((address.sin_addr.s_addr ^ source.sin_addr.s_addr) & link.mask.s_addr) == 0;
+        })) return {nullptr, "source_route_unavailable", 0};
+#if BUILDFLAG(IS_WIN)
+    const uint32_t index = htonl(interface_index);
+    constexpr int option = IP_UNICAST_IF;
+#else
+    const uint32_t index = interface_index;
+    constexpr int option = IP_BOUND_IF;
+#endif
+    if (platform::SetOption(socket.get(), IPPROTO_IP, option, &index, sizeof(index)))
+      return {nullptr, "interface_bind_failed", platform::Error()};
+    if (bind(socket.get(), reinterpret_cast<sockaddr*>(&source), sizeof(source)))
+      return {nullptr, "source_bind_failed", platform::Error()};
+  }
   bool connected = connect(socket.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0;
   if (!connected && !platform::Pending(platform::Error())) return {nullptr, "connect_failed", platform::Error()};
   while (!connected && active() && base::TimeTicks::Now() < deadline) {

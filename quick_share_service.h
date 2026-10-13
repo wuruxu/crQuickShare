@@ -10,13 +10,20 @@
 #include "base/files/file_path.h"
 
 namespace crquickshare {
+struct LanRoute {
+  std::string address, local_address;
+  unsigned interface_index = 0;
+  bool operator==(const LanRoute&) const = default;
+};
 struct Peer {
   std::string id;
   std::string name;
   std::string address;
   uint16_t port = 0;
   std::vector<std::string> alternate_addresses;
+  std::vector<LanRoute> routes;  // Each address retains its discovery interface and source IPv4.
   std::string endpoint_info;  // Untrusted discovery identity, used only to deduplicate.
+  std::string public_name_info;  // Matching public BLE endpoint info; display hint only.
   std::string bluetooth_address;  // Display only; never a transport address or identity.
   bool ble_only = false;  // No LAN address; must never be passed to Send().
   // Local diagnostics only, never serialized or used for authentication.
@@ -50,6 +57,8 @@ struct Snapshot {
   uint8_t peer_device_type = 0;
   std::string code;
   std::vector<std::string> files;
+  uint32_t text_count = 0;
+  bool text_is_url = false;
   // Diagnostic only; UI presents a localized error, details go to the log.
   std::string diagnostic;
   Failure failure = Failure::kNone;
@@ -57,9 +66,13 @@ struct Snapshot {
 };
 class QuickShareService {
  public:
-  QuickShareService(std::string name, base::FilePath destination);
+  struct ReceivedText { uint64_t session; std::string text; };
+  QuickShareService(std::string name, base::FilePath destination, bool receive_text = false);
   ~QuickShareService();
   Snapshot GetSnapshot() const;
+  // Consumes completed, approved UTF-8 text batches once. Clipboard access
+  // belongs to the embedding application's UI thread, not the session worker.
+  std::vector<ReceivedText> TakeReceivedTexts();
   // Default visibility lasts ten minutes; an embedding app can opt into
   // continuous reception for the lifetime of its enabled service.
   void SetReceiving(bool enabled, bool continuous = false);

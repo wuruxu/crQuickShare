@@ -8,7 +8,7 @@
 <translation id="8181876038280848864">Partilhe ficheiros na rede local sem iniciar sessão no Google.</translation>
 <translation id="2804694785588298928">Receber durante 10 minutos</translation>
 <translation id="8235434987148291431">Parar de receber</translation>
-<translation id="4677490628742467789">Escolher ficheiros (até 100)</translation>
+<translation id="6720792508518440468">Escolher ficheiros (até 1024)</translation>
 <translation id="7074670349438858233">Oculto para dispositivos próximos</translation>
 <translation id="1136534526719901357">Visível para todos nesta rede durante um máximo de 10 minutos</translation>
 <translation id="953692523250483872">Nenhum ficheiro selecionado</translation>
@@ -48,7 +48,7 @@
   <translation id="6810075817102686774">Ficheiros transferidos</translation>
   <translation id="7962960561507616835">Velocidade de transferência</translation>
   <translation id="4816292591240970283">Tempo restante (min:s)</translation>
-<translation id="3181950488593258710">A estrutura das pastas é preservada. As pastas vazias são ignoradas. Até 100 ficheiros por transferência, incluindo os ficheiros nas pastas. O destinatário pode tratar as pastas de outra forma.</translation>
+<translation id="1431933172646212969">A estrutura das pastas é preservada. As pastas vazias são ignoradas. Até 1024 ficheiros por transferência, incluindo os ficheiros nas pastas. O destinatário pode tratar as pastas de outra forma.</translation>
 <translation id="4532845899244822526">Escolher pasta</translation>
 <translation id="9186448452346591728"><ph name="COUNT"/> item(ns) selecionado(s)</translation>
 </translationbundle>

@@ -40,7 +40,7 @@
 <message name="IDS_CQS_SUBTITLE" desc="crQuickShare interface: subtitle.">Share files on your local network. No Google sign-in required.</message>
 <message name="IDS_CQS_RECEIVE" desc="crQuickShare interface: receive.">Receive for 10 minutes</message>
 <message name="IDS_CQS_STOP_RECEIVING" desc="crQuickShare interface: stop_receiving.">Stop receiving</message>
-<message name="IDS_CQS_CHOOSE" desc="crQuickShare interface: choose.">Choose files (up to 100)</message>
+<message name="IDS_CQS_CHOOSE" desc="crQuickShare interface: choose.">Choose files (up to 1024)</message>
 <message name="IDS_CQS_HIDDEN" desc="crQuickShare interface: hidden.">Hidden from nearby devices</message>
 <message name="IDS_CQS_VISIBLE" desc="crQuickShare interface: visible.">Visible to everyone on this network for up to 10 minutes</message>
 <message name="IDS_CQS_NO_FILES" desc="crQuickShare interface: no_files.">No files selected</message>
@@ -81,7 +81,7 @@
 <message name="IDS_CQS_PROGRESS_FINISHED" meaning="Quick Share transfer progress" desc="Transfer progress label; finished counts payload completion, not remote delivery confirmation.">Files transferred</message>
 <message name="IDS_CQS_PROGRESS_SPEED" meaning="Quick Share transfer progress" desc="Transfer progress label; finished counts payload completion, not remote delivery confirmation.">Transfer speed</message>
 <message name="IDS_CQS_PROGRESS_REMAINING" meaning="Quick Share transfer progress" desc="Transfer progress label; finished counts payload completion, not remote delivery confirmation.">Time remaining (min:sec)</message>
-<message name="IDS_CQS_FOLDER_HINT" desc="Quick Share directory selection and protocol limitations.">Send files with their folder structure. Empty folders are skipped. Up to 100 files per transfer, including files inside folders. The receiver may handle folders differently.</message>
+<message name="IDS_CQS_FOLDER_HINT" desc="Quick Share directory selection and protocol limitations.">Send files with their folder structure. Empty folders are skipped. Up to 1024 files per transfer, including files inside folders. The receiver may handle folders differently.</message>
 <message name="IDS_CQS_CHOOSE_FOLDER" desc="Quick Share directory selection and protocol limitations.">Choose folder</message>
 <message name="IDS_CQS_SELECTED" desc="Quick Share directory selection and protocol limitations."><ph name="COUNT"><ex>2</ex>$1</ph> item(s) selected</message>
 </messages></release>

@@ -8,7 +8,7 @@
 <translation id="8181876038280848864">ローカルネットワークでファイルを共有します。Google へのログインは不要です。</translation>
 <translation id="2804694785588298928">10 分間受信する</translation>
 <translation id="8235434987148291431">受信を停止</translation>
-<translation id="4677490628742467789">ファイルを選択（最大 100 個）</translation>
+<translation id="6720792508518440468">ファイルを選択（最大 1024 個）</translation>
 <translation id="7074670349438858233">近くのデバイスに非表示</translation>
 <translation id="1136534526719901357">このネットワークの全員に最大 10 分間公開</translation>
 <translation id="953692523250483872">ファイルが選択されていません</translation>
@@ -48,7 +48,7 @@
   <translation id="6810075817102686774">転送済みファイル</translation>
   <translation id="7962960561507616835">転送速度</translation>
   <translation id="4816292591240970283">残り時間（分:秒）</translation>
-<translation id="3181950488593258710">フォルダ構造は保持されます。空のフォルダはスキップされます。フォルダ内のファイルを含め、1 回につき最大 100 ファイルを転送できます。 受信側のフォルダの扱いは異なる場合があります。</translation>
+<translation id="1431933172646212969">フォルダ構造は保持されます。空のフォルダはスキップされます。フォルダ内のファイルを含め、1 回につき最大 1024 ファイルを転送できます。 受信側のフォルダの扱いは異なる場合があります。</translation>
 <translation id="4532845899244822526">フォルダを選択</translation>
 <translation id="9186448452346591728"><ph name="COUNT"/> 個の項目を選択済み</translation>
 </translationbundle>

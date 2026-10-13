@@ -8,7 +8,7 @@
 <translation id="8181876038280848864">Comparte archivos en tu red local sin iniciar sesión en Google.</translation>
 <translation id="2804694785588298928">Recibir durante 10 minutos</translation>
 <translation id="8235434987148291431">Dejar de recibir</translation>
-<translation id="4677490628742467789">Elegir archivos (máximo 100)</translation>
+<translation id="6720792508518440468">Elegir archivos (máximo 1024)</translation>
 <translation id="7074670349438858233">Oculto para los dispositivos cercanos</translation>
 <translation id="1136534526719901357">Visible para todos en esta red durante un máximo de 10 minutos</translation>
 <translation id="953692523250483872">Ningún archivo seleccionado</translation>
@@ -48,7 +48,7 @@
   <translation id="6810075817102686774">Archivos transferidos</translation>
   <translation id="7962960561507616835">Velocidad de transferencia</translation>
   <translation id="4816292591240970283">Tiempo restante (min:s)</translation>
-<translation id="3181950488593258710">Se conserva la estructura de las carpetas. Se omiten las carpetas vacías. Hasta 100 archivos por transferencia, incluidos los de las carpetas. El receptor puede gestionar las carpetas de otra manera.</translation>
+<translation id="1431933172646212969">Se conserva la estructura de las carpetas. Se omiten las carpetas vacías. Hasta 1024 archivos por transferencia, incluidos los de las carpetas. El receptor puede gestionar las carpetas de otra manera.</translation>
 <translation id="4532845899244822526">Elegir carpeta</translation>
 <translation id="9186448452346591728"><ph name="COUNT"/> elemento(s) seleccionado(s)</translation>
 </translationbundle>

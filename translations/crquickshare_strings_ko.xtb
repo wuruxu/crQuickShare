@@ -8,7 +8,7 @@
 <translation id="8181876038280848864">로컬 네트워크에서 파일을 공유합니다. Google 로그인이 필요하지 않습니다.</translation>
 <translation id="2804694785588298928">10분 동안 수신</translation>
 <translation id="8235434987148291431">수신 중지</translation>
-<translation id="4677490628742467789">파일 선택 (최대 100개)</translation>
+<translation id="6720792508518440468">파일 선택 (최대 1024개)</translation>
 <translation id="7074670349438858233">주변 기기에 숨김</translation>
 <translation id="1136534526719901357">이 네트워크의 모든 사용자에게 최대 10분 동안 표시</translation>
 <translation id="953692523250483872">선택한 파일 없음</translation>
@@ -48,7 +48,7 @@
   <translation id="6810075817102686774">전송한 파일</translation>
   <translation id="7962960561507616835">전송 속도</translation>
   <translation id="4816292591240970283">남은 시간(분:초)</translation>
-<translation id="3181950488593258710">폴더 구조가 유지됩니다. 빈 폴더는 건너뜁니다. 폴더 안의 파일을 포함하여 한 번에 최대 100개 파일을 전송할 수 있습니다. 수신 기기의 폴더 처리 방식은 다를 수 있습니다.</translation>
+<translation id="1431933172646212969">폴더 구조가 유지됩니다. 빈 폴더는 건너뜁니다. 폴더 안의 파일을 포함하여 한 번에 최대 1024개 파일을 전송할 수 있습니다. 수신 기기의 폴더 처리 방식은 다를 수 있습니다.</translation>
 <translation id="4532845899244822526">폴더 선택</translation>
 <translation id="9186448452346591728">항목 <ph name="COUNT"/>개 선택됨</translation>
 </translationbundle>
