@@ -1,0 +1,210 @@
+# Copyright 2026 The Chromium Authors
+# Use of this source code is governed by a BSD-style license.
+import("//build/config/libcr.gni")
+import("//build/config/ui.gni")
+import("//tools/grit/grit_rule.gni")
+import("//tools/grit/repack.gni")
+assert((is_linux && !is_chromeos) || is_win || is_mac,
+       "Quick Share LAN backends require a desktop platform")
+
+cqs_locales = [
+  "ja",
+  "ko",
+  "zh-CN",
+  "zh-HK",
+  "zh-TW",
+  "ar",
+  "fr",
+  "fr-CA",
+  "ru",
+  "es",
+  "es-419",
+  "pt-BR",
+  "pt-PT",
+]
+grit("strings") {
+  source = "crquickshare_strings.grd"
+  resource_ids = ""
+  outputs = [
+    "grit/crquickshare_strings.h",
+    "crquickshare_strings_en-US.pak",
+  ]
+  foreach(locale, cqs_locales) {
+    outputs += [ "crquickshare_strings_${locale}.pak" ]
+  }
+}
+repack("resources") {
+  sources = [
+    "$root_gen_dir/ui/resources/ui_resources_100_percent.pak",
+    "$root_gen_dir/ui/strings/app_locale_settings_en-US.pak",
+    "$root_gen_dir/ui/strings/ax_strings_en-US.pak",
+    "$root_gen_dir/ui/strings/ui_strings_en-US.pak",
+    "$root_gen_dir/ui/views/resources/views_resources_100_percent.pak",
+    "$target_gen_dir/crquickshare_strings_en-US.pak",
+  ]
+  output = "$root_out_dir/crquickshare_resources.pak"
+  deps = [
+    ":strings",
+    "//ui/resources",
+    "//ui/strings",
+    "//ui/views/resources",
+  ]
+}
+repack("resources_200") {
+  sources = [
+    "$root_gen_dir/ui/resources/ui_resources_200_percent.pak",
+    "$root_gen_dir/ui/views/resources/views_resources_200_percent.pak",
+  ]
+  output = "$root_out_dir/crquickshare_resources_200_percent.pak"
+  deps = [
+    "//ui/resources",
+    "//ui/views/resources",
+  ]
+}
+foreach(locale, cqs_locales) {
+  repack("resources_${locale}") {
+    sources = [
+      "$root_gen_dir/ui/strings/app_locale_settings_${locale}.pak",
+      "$root_gen_dir/ui/strings/ax_strings_${locale}.pak",
+      "$root_gen_dir/ui/strings/ui_strings_${locale}.pak",
+      "$target_gen_dir/crquickshare_strings_${locale}.pak",
+    ]
+    output = "$root_out_dir/crquickshare_resources_${locale}.pak"
+    deps = [
+      ":strings",
+      "//ui/strings",
+    ]
+  }
+}
+source_set("protocol") {
+  sources = [
+    "connection_listener.h",
+    "file_storage.cc",
+    "file_storage.h",
+    "lan_discovery.cc",
+    "lan_discovery.h",
+    "lan_discovery_mdns.cc",
+    "mdns_codec.cc",
+    "mdns_codec.h",
+    "mdns_network.h",
+    "quick_share_service.cc",
+    "quick_share_service.h",
+    "transport_channel.cc",
+    "transport_channel.h",
+  ]
+  # Only the factories/backends below depend on native OS APIs. Keep protocol,
+  # metadata, path validation and public interface headers platform-independent.
+  if (is_linux && !is_chromeos) {
+    sources += [
+      "file_storage_linux.cc",
+      "lan_discovery_linux.cc",
+      "transport_channel_linux.cc",
+    ]
+  }
+  if (is_win || is_mac) {
+    sources += [
+      "platform_socket.cc",
+      "platform_socket.h",
+      "lan_discovery_desktop.cc",
+      "transport_channel_desktop.cc",
+    ]
+  }
+  if (is_win) {
+    sources += [ "file_storage_win.cc" ]
+    libs = [ "ws2_32.lib", "iphlpapi.lib" ]
+  }
+  if (is_mac) {
+    sources += [ "file_storage_mac.cc" ]
+  }
+  if (enable_libcr_shared) {
+    deps = [ "//libcr:engine" ]
+  } else {
+    deps = [
+      "//base",
+      "//third_party/nearby:offline_wire_formats_proto",
+      "//third_party/nearby:wire_format_proto",
+      "//third_party/ukey2",
+    ]
+  }
+
+  # Uses the upstream protocol and crypto targets without ChromeOS platform
+  # code.
+}
+if (is_linux && !is_chromeos) {
+source_set("ble") {
+  public_deps = [ ":protocol" ]
+  sources = [ "ble_wakeup.cc", "ble_wakeup.h", "ble_discovery.cc", "ble_discovery.h" ]
+  if (enable_libcr_shared) {
+    deps = [ "//libcr:engine" ]
+  } else {
+    deps = [ "//base", "//crypto", "//device/bluetooth" ]
+  }
+}
+executable("crQuickShare") {
+  sources = [
+    "crquickshare_main.cc",
+    "crquickshare_window.cc",
+    "crquickshare_window.h",
+  ]
+  deps = [
+    ":ble",
+    ":protocol",
+    ":strings",
+  ]
+  if (enable_libcr_shared) {
+    deps += [ "//libcr:engine" ]
+    no_default_deps = true
+    configs += [ "//build/config/gcc:rpath_for_built_shared_libraries" ]
+    ldflags = [
+      "-Wl,-z,defs",
+      "-Wl,--no-allow-shlib-undefined",
+    ]
+  } else {
+    deps += [
+      "//base",
+      "//base:i18n",
+      "//base/allocator:buildflags",
+      "//components/discardable_memory/service",
+      "//device/bluetooth",
+      "//libcr",
+      "//libcr:viz",
+      "//mojo/core/embedder",
+      "//mojo/public/cpp/bindings",
+      "//skia",
+      "//ui/accessibility",
+      "//ui/base",
+      "//ui/base/ime/init",
+      "//ui/color",
+      "//ui/compositor",
+      "//ui/display",
+      "//ui/events",
+      "//ui/gfx",
+      "//ui/gfx/geometry",
+      "//ui/gl",
+      "//ui/gl/init",
+      "//ui/linux:display_server_utils",
+      "//ui/linux:linux_ui",
+      "//ui/linux:linux_ui_factory",
+      "//ui/shell_dialogs",
+      "//ui/views",
+    ]
+    if (use_aura) {
+      deps += [
+        "//ui/aura",
+        "//ui/wm",
+      ]
+    }
+    if (use_ozone) {
+      deps += [ "//ui/ozone" ]
+    }
+  }
+  data_deps = [
+    ":resources",
+    ":resources_200",
+  ]
+  foreach(locale, cqs_locales) {
+    data_deps += [ ":resources_${locale}" ]
+  }
+}
+
+}

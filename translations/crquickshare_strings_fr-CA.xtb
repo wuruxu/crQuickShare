@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE translationbundle>
+<translationbundle lang="fr-CA">
+<translation id="5941711191222866238">Réduire</translation>
+<translation id="1398853756734560583">Agrandir</translation>
+<translation id="3157931365184549694">Restaurer</translation>
+<translation id="6040143037577758943">Fermer</translation>
+<translation id="8181876038280848864">Partagez des fichiers sur votre réseau local, sans connexion Google.</translation>
+<translation id="2804694785588298928">Recevoir pendant 10 minutes</translation>
+<translation id="8235434987148291431">Arrêter la réception</translation>
+<translation id="4677490628742467789">Choisir des fichiers (100 maximum)</translation>
+<translation id="7074670349438858233">Masqué pour les appareils à proximité</translation>
+<translation id="1136534526719901357">Visible par tous sur ce réseau pendant 10 minutes au maximum</translation>
+<translation id="953692523250483872">Aucun fichier sélectionné</translation>
+<translation id="1219749905305551951">Appareils à proximité</translation>
+<translation id="7989784335483577523">Ouvrez Quick Share sur l’autre appareil et rendez-le visible par tous. Les deux appareils doivent être sur le même réseau.</translation>
+<translation id="5027188696592292896">Prêt à partager</translation>
+<translation id="5737164735602202642">Connexion sécurisée…</translation>
+<translation id="7327232760987881796">Fichiers entrants — vérifiez le code avant d’accepter</translation>
+<translation id="5813147605491386311">Comparez le code sur les deux appareils avant de continuer</translation>
+<translation id="674352937515546162">En attente de l’autre appareil…</translation>
+<translation id="9160972414642256993">Réception des fichiers…</translation>
+<translation id="2720604938272916375">Envoi des fichiers…</translation>
+<translation id="3580456221777141248">Transfert terminé</translation>
+<translation id="3834935128831710195">Transfert refusé</translation>
+<translation id="558345155424485441">Transfert annulé</translation>
+<translation id="8371969725114387366">Échec du transfert. Vérifiez la connexion, l’espace disponible et les autorisations des fichiers, puis réessayez.</translation>
+<translation id="5336482190349592693">Codes identiques — continuer</translation>
+<translation id="6452181791372256707">Refuser</translation>
+<translation id="7658239707568436148">Annuler</translation>
+<translation id="6002049034818931553">Enregistrer dans :</translation>
+<translation id="6818978617725048861">Code de vérification : <ph name="CODE"/></translation>
+<translation id="3786167654761312760">La découverte locale est indisponible. Vérifiez le réseau et le port UDP 5353, puis redémarrez crQuickShare.</translation>
+<translation id="9048139735985720549">Envoyer les fichiers sélectionnés à cet appareil</translation>
+<translation id="8239476720121986113">Fichiers envoyés. L’autre appareil a fermé la connexion sans confirmer la réception.</translation>
+<translation id="6942973706240438936">Le transfert a expiré. Veuillez réessayer.</translation>
+<translation id="580639705303209941">Rechercher des téléphones</translation>
+<translation id="2522318852650576992">Arrêter la recherche</translation>
+<translation id="1786570139860190731">Démarrage de l’aide à la détection Bluetooth…</translation>
+<translation id="5225613818615099949">Signal envoyé aux téléphones à proximité pendant 2 minutes maximum. Activez le Bluetooth et restez sur le même réseau.</translation>
+<translation id="9208413327757315813">L’aide Bluetooth n’est pas disponible. Ouvrez l’écran de réception Quick Share sur votre téléphone. Le partage sur le réseau local reste disponible.</translation>
+  <translation id="7295294312375734147">Appareil Quick Share à proximité</translation>
+  <translation id="5026581245371276479">Bluetooth uniquement</translation>
+  <translation id="7108699793566969157">Détecté via Bluetooth. Connectez-vous au même réseau pour envoyer des fichiers.</translation>
+  <translation id="5835513660254436267">Recherche d’appareils Quick Share à proximité via Bluetooth.</translation>
+  <translation id="8952915576472102937">La détection Bluetooth est indisponible. La détection sur le réseau local reste disponible lorsque vous êtes connecté à un réseau.</translation>
+  <translation id="2538229999269666773">Fichier</translation>
+  <translation id="6810075817102686774">Fichiers transférés</translation>
+  <translation id="7962960561507616835">Vitesse de transfert</translation>
+  <translation id="4816292591240970283">Temps restant (min:s)</translation>
+<translation id="3181950488593258710">La structure des dossiers est conservée. Les dossiers vides sont ignorés. Jusqu’à 100 fichiers par transfert, y compris ceux des dossiers. Le destinataire peut traiter les dossiers différemment.</translation>
+<translation id="4532845899244822526">Choisir un dossier</translation>
+<translation id="9186448452346591728"><ph name="COUNT"/> élément(s) sélectionné(s)</translation>
+</translationbundle>

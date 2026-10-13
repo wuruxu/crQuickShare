@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE translationbundle>
+<translationbundle lang="zh-TW">
+<translation id="5941711191222866238">最小化</translation>
+<translation id="1398853756734560583">最大化</translation>
+<translation id="3157931365184549694">還原</translation>
+<translation id="6040143037577758943">關閉</translation>
+<translation id="8181876038280848864">在區域網路內分享檔案，無需登入 Google。</translation>
+<translation id="2804694785588298928">接收 10 分鐘</translation>
+<translation id="8235434987148291431">停止接收</translation>
+<translation id="4677490628742467789">選擇檔案（最多 100 個）</translation>
+<translation id="7074670349438858233">對附近裝置隱藏</translation>
+<translation id="1136534526719901357">在此網路中對所有人顯示，最長 10 分鐘</translation>
+<translation id="953692523250483872">未選擇檔案</translation>
+<translation id="1219749905305551951">附近的裝置</translation>
+<translation id="7989784335483577523">在另一台裝置開啟 Quick Share，並設為對所有人顯示。兩台裝置必須位於同一網路。</translation>
+<translation id="5027188696592292896">準備分享</translation>
+<translation id="5737164735602202642">正在建立安全連線…</translation>
+<translation id="7327232760987881796">收到檔案要求 — 接受前請核對驗證碼</translation>
+<translation id="5813147605491386311">請核對兩台裝置上的驗證碼後繼續</translation>
+<translation id="674352937515546162">正在等待另一台裝置…</translation>
+<translation id="9160972414642256993">正在接收檔案…</translation>
+<translation id="2720604938272916375">正在傳送檔案…</translation>
+<translation id="3580456221777141248">傳輸完成</translation>
+<translation id="3834935128831710195">已拒絕傳輸</translation>
+<translation id="558345155424485441">已取消傳輸</translation>
+<translation id="8371969725114387366">傳輸失敗。請檢查網路連線、可用空間和檔案權限，然後重試。</translation>
+<translation id="5336482190349592693">驗證碼相符 — 繼續</translation>
+<translation id="6452181791372256707">拒絕</translation>
+<translation id="7658239707568436148">取消</translation>
+<translation id="6002049034818931553">儲存至：</translation>
+<translation id="6818978617725048861">驗證碼：<ph name="CODE"/></translation>
+<translation id="3786167654761312760">區域網路探索無法使用。請檢查網路和 UDP 5353 連接埠，然後重新啟動 crQuickShare。</translation>
+<translation id="9048139735985720549">將所選檔案傳送至此裝置</translation>
+<translation id="8239476720121986113">檔案已傳送。對方已關閉連線，但未傳回送達確認。</translation>
+<translation id="6942973706240438936">傳輸逾時，請再試一次。</translation>
+<translation id="580639705303209941">尋找附近手機</translation>
+<translation id="2522318852650576992">停止尋找手機</translation>
+<translation id="1786570139860190731">正在啟動藍牙探索輔助…</translation>
+<translation id="5225613818615099949">正在通知附近手機，最長持續 2 分鐘。請開啟藍牙並連線至同一網路。</translation>
+<translation id="9208413327757315813">藍牙探索輔助無法使用。請在手機上開啟 Quick Share 接收畫面；區域網路分享仍可使用。</translation>
+  <translation id="7295294312375734147">附近的 Quick Share 裝置</translation>
+  <translation id="5026581245371276479">僅藍牙探索</translation>
+  <translation id="7108699793566969157">已透過藍牙探索到裝置。請連接同一網路以傳送檔案。</translation>
+  <translation id="5835513660254436267">正在透過藍牙搜尋附近的 Quick Share 裝置。</translation>
+  <translation id="8952915576472102937">藍牙探索功能無法使用。連接網路後仍可透過區域網路尋找裝置。</translation>
+  <translation id="2538229999269666773">檔案</translation>
+  <translation id="6810075817102686774">已傳輸檔案</translation>
+  <translation id="7962960561507616835">傳輸速度</translation>
+  <translation id="4816292591240970283">剩餘時間（分:秒）</translation>
+<translation id="3181950488593258710">資料夾會保留目錄結構，空資料夾將略過。每次最多傳輸 100 個檔案，包含資料夾內的檔案。 接收端可能採用不同的目錄處理方式。</translation>
+<translation id="4532845899244822526">選擇資料夾</translation>
+<translation id="9186448452346591728">已選取 <ph name="COUNT"/> 個項目</translation>
+</translationbundle>

@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grit latest_public_release="0" current_release="1" source_lang_id="en" enc_check="möl">
+<outputs>
+<output filename="grit/crquickshare_strings.h" type="rc_header"><emit emit_type="prepend"></emit></output>
+<output filename="crquickshare_strings_en-US.pak" type="data_package" lang="en"/>
+<output filename="crquickshare_strings_zh-CN.pak" type="data_package" lang="zh-CN"/>
+<output filename="crquickshare_strings_zh-TW.pak" type="data_package" lang="zh-TW"/>
+<output filename="crquickshare_strings_zh-HK.pak" type="data_package" lang="zh-HK"/>
+<output filename="crquickshare_strings_ja.pak" type="data_package" lang="ja"/>
+<output filename="crquickshare_strings_ko.pak" type="data_package" lang="ko"/>
+<output filename="crquickshare_strings_fr.pak" type="data_package" lang="fr"/>
+<output filename="crquickshare_strings_fr-CA.pak" type="data_package" lang="fr-CA"/>
+<output filename="crquickshare_strings_es.pak" type="data_package" lang="es"/>
+<output filename="crquickshare_strings_es-419.pak" type="data_package" lang="es-419"/>
+<output filename="crquickshare_strings_pt-BR.pak" type="data_package" lang="pt-BR"/>
+<output filename="crquickshare_strings_pt-PT.pak" type="data_package" lang="pt-PT"/>
+<output filename="crquickshare_strings_ru.pak" type="data_package" lang="ru"/>
+<output filename="crquickshare_strings_ar.pak" type="data_package" lang="ar"/>
+</outputs>
+<translations>
+<file path="translations/crquickshare_strings_zh-CN.xtb" lang="zh-CN"/>
+<file path="translations/crquickshare_strings_zh-TW.xtb" lang="zh-TW"/>
+<file path="translations/crquickshare_strings_zh-HK.xtb" lang="zh-HK"/>
+<file path="translations/crquickshare_strings_ja.xtb" lang="ja"/>
+<file path="translations/crquickshare_strings_ko.xtb" lang="ko"/>
+<file path="translations/crquickshare_strings_fr.xtb" lang="fr"/>
+<file path="translations/crquickshare_strings_fr-CA.xtb" lang="fr-CA"/>
+<file path="translations/crquickshare_strings_es.xtb" lang="es"/>
+<file path="translations/crquickshare_strings_es-419.xtb" lang="es-419"/>
+<file path="translations/crquickshare_strings_pt-BR.xtb" lang="pt-BR"/>
+<file path="translations/crquickshare_strings_pt-PT.xtb" lang="pt-PT"/>
+<file path="translations/crquickshare_strings_ru.xtb" lang="ru"/>
+<file path="translations/crquickshare_strings_ar.xtb" lang="ar"/>
+</translations>
+<release seq="1"><messages first_id="32000">
+<message name="IDS_CQS_MINIMIZE" desc="crQuickShare interface: minimize.">Minimize</message>
+<message name="IDS_CQS_MAXIMIZE" desc="crQuickShare interface: maximize.">Maximize</message>
+<message name="IDS_CQS_RESTORE" desc="crQuickShare interface: restore.">Restore</message>
+<message name="IDS_CQS_CLOSE" desc="crQuickShare interface: close.">Close</message>
+<message name="IDS_CQS_SUBTITLE" desc="crQuickShare interface: subtitle.">Share files on your local network. No Google sign-in required.</message>
+<message name="IDS_CQS_RECEIVE" desc="crQuickShare interface: receive.">Receive for 10 minutes</message>
+<message name="IDS_CQS_STOP_RECEIVING" desc="crQuickShare interface: stop_receiving.">Stop receiving</message>
+<message name="IDS_CQS_CHOOSE" desc="crQuickShare interface: choose.">Choose files (up to 100)</message>
+<message name="IDS_CQS_HIDDEN" desc="crQuickShare interface: hidden.">Hidden from nearby devices</message>
+<message name="IDS_CQS_VISIBLE" desc="crQuickShare interface: visible.">Visible to everyone on this network for up to 10 minutes</message>
+<message name="IDS_CQS_NO_FILES" desc="crQuickShare interface: no_files.">No files selected</message>
+<message name="IDS_CQS_DEVICES" desc="crQuickShare interface: devices.">Nearby devices</message>
+<message name="IDS_CQS_NO_DEVICES" desc="crQuickShare interface: no_devices.">Open Quick Share on the other device and select visibility to everyone. Both devices must be on the same network.</message>
+<message name="IDS_CQS_READY" desc="crQuickShare interface: ready.">Ready to share</message>
+<message name="IDS_CQS_CONNECTING" desc="crQuickShare interface: connecting.">Connecting securely…</message>
+<message name="IDS_CQS_INCOMING" desc="crQuickShare interface: incoming.">Incoming files — compare the code before accepting</message>
+<message name="IDS_CQS_CONFIRM" desc="crQuickShare interface: confirm.">Compare the code on both devices before continuing</message>
+<message name="IDS_CQS_WAITING" desc="crQuickShare interface: waiting.">Waiting for the other device…</message>
+<message name="IDS_CQS_RECEIVING" desc="crQuickShare interface: receiving.">Receiving files…</message>
+<message name="IDS_CQS_SENDING" desc="crQuickShare interface: sending.">Sending files…</message>
+<message name="IDS_CQS_COMPLETE" desc="crQuickShare interface: complete.">Transfer complete</message>
+<message name="IDS_CQS_REJECTED" desc="crQuickShare interface: rejected.">Transfer rejected</message>
+<message name="IDS_CQS_CANCELLED" desc="crQuickShare interface: cancelled.">Transfer cancelled</message>
+<message name="IDS_CQS_ERROR" desc="crQuickShare interface: error.">Transfer failed. Check the connection, available space and file permissions, then try again.</message>
+<message name="IDS_CQS_ACCEPT" desc="crQuickShare interface: accept.">Codes match — continue</message>
+<message name="IDS_CQS_REJECT" desc="crQuickShare interface: reject.">Reject</message>
+<message name="IDS_CQS_CANCEL" desc="crQuickShare interface: cancel.">Cancel</message>
+<message name="IDS_CQS_SAVE_TO" desc="crQuickShare interface: save_to.">Save to:</message>
+
+<message name="IDS_CQS_CODE" desc="crQuickShare interface: code.">Verification code: <ph name="CODE"><ex>1234</ex>$1</ph></message>
+<message name="IDS_CQS_NETWORK_ERROR" desc="crQuickShare interface: network_error.">Local discovery is unavailable. Check your network and UDP port 5353, then restart crQuickShare.</message>
+<message name="IDS_CQS_SEND" desc="crQuickShare interface: send.">Send selected files to this device</message>
+<message name="IDS_CQS_SENT" desc="crQuickShare interface: sent.">Files sent. The peer closed the connection without a delivery acknowledgement.</message>
+<message name="IDS_CQS_TIMED_OUT" desc="Transfer or confirmation deadline expired.">The transfer timed out. Please try again.</message>
+<message name="IDS_CQS_WAKE" desc="Bluetooth Fast Initiation discovery assistance: wake.">Find nearby phones</message>
+<message name="IDS_CQS_WAKE_STOP" desc="Bluetooth Fast Initiation discovery assistance: wake_stop.">Stop finding phones</message>
+<message name="IDS_CQS_WAKE_STARTING" desc="Bluetooth Fast Initiation discovery assistance: wake_starting.">Starting Bluetooth discovery assistance…</message>
+<message name="IDS_CQS_WAKE_ACTIVE" desc="Bluetooth Fast Initiation discovery assistance: wake_active.">Signaling nearby phones for up to 2 minutes. Keep Bluetooth on and stay on the same network.</message>
+<message name="IDS_CQS_WAKE_UNAVAILABLE" desc="Bluetooth Fast Initiation discovery assistance: wake_unavailable.">Bluetooth assistance is unavailable. Open Quick Share Receive on your phone; LAN sharing still works.</message>
+<message name="IDS_CQS_BLE_DEVICE" desc="Bluetooth discovery status; discovery does not authorize transfers.">Nearby Quick Share device</message>
+<message name="IDS_CQS_BLE_ONLY" desc="Bluetooth discovery status; discovery does not authorize transfers.">Bluetooth only</message>
+<message name="IDS_CQS_BLE_HINT" desc="Bluetooth discovery status; discovery does not authorize transfers.">Discovered via Bluetooth. Join the same network to send files.</message>
+<message name="IDS_CQS_BLE_SCANNING" desc="Bluetooth discovery status; discovery does not authorize transfers.">Scanning for nearby Quick Share devices via Bluetooth.</message>
+<message name="IDS_CQS_BLE_UNAVAILABLE" desc="Bluetooth discovery status; discovery does not authorize transfers.">Bluetooth discovery is unavailable. LAN discovery remains available when connected to a network.</message>
+<message name="IDS_CQS_PROGRESS_FILE" meaning="Quick Share transfer progress" desc="Transfer progress label; finished counts payload completion, not remote delivery confirmation.">File</message>
+<message name="IDS_CQS_PROGRESS_FINISHED" meaning="Quick Share transfer progress" desc="Transfer progress label; finished counts payload completion, not remote delivery confirmation.">Files transferred</message>
+<message name="IDS_CQS_PROGRESS_SPEED" meaning="Quick Share transfer progress" desc="Transfer progress label; finished counts payload completion, not remote delivery confirmation.">Transfer speed</message>
+<message name="IDS_CQS_PROGRESS_REMAINING" meaning="Quick Share transfer progress" desc="Transfer progress label; finished counts payload completion, not remote delivery confirmation.">Time remaining (min:sec)</message>
+<message name="IDS_CQS_FOLDER_HINT" desc="Quick Share directory selection and protocol limitations.">Send files with their folder structure. Empty folders are skipped. Up to 100 files per transfer, including files inside folders. The receiver may handle folders differently.</message>
+<message name="IDS_CQS_CHOOSE_FOLDER" desc="Quick Share directory selection and protocol limitations.">Choose folder</message>
+<message name="IDS_CQS_SELECTED" desc="Quick Share directory selection and protocol limitations."><ph name="COUNT"><ex>2</ex>$1</ph> item(s) selected</message>
+</messages></release>
+</grit>

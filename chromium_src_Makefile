@@ -1,0 +1,10 @@
+# Run from Chromium src. Compilation is always performed through autoninja.
+CQS_SHARED ?= false
+CQS_OUT ?= $(if $(filter true,$(CQS_SHARED)),out/crquickshare-shared,out/crquickshare)
+.PHONY: cqs cqs-configure cqs-resources-check
+cqs-configure:
+	gn gen $(CQS_OUT) --args='is_debug=false is_component_build=false symbol_level=0 chrome_pgo_phase=0 enable_libcr_shared=$(CQS_SHARED) root_extra_deps=["//crQuickShare"]'
+cqs:
+	autoninja -C $(CQS_OUT) crQuickShare
+cqs-resources-check:
+	python3 crQuickShare/tools/validate_resources.py

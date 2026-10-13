@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE translationbundle>
+<translationbundle lang="ja">
+<translation id="5941711191222866238">最小化</translation>
+<translation id="1398853756734560583">最大化</translation>
+<translation id="3157931365184549694">元に戻す</translation>
+<translation id="6040143037577758943">閉じる</translation>
+<translation id="8181876038280848864">ローカルネットワークでファイルを共有します。Google へのログインは不要です。</translation>
+<translation id="2804694785588298928">10 分間受信する</translation>
+<translation id="8235434987148291431">受信を停止</translation>
+<translation id="4677490628742467789">ファイルを選択（最大 100 個）</translation>
+<translation id="7074670349438858233">近くのデバイスに非表示</translation>
+<translation id="1136534526719901357">このネットワークの全員に最大 10 分間公開</translation>
+<translation id="953692523250483872">ファイルが選択されていません</translation>
+<translation id="1219749905305551951">近くのデバイス</translation>
+<translation id="7989784335483577523">相手のデバイスで Quick Share を開き、全員に公開してください。両方のデバイスを同じネットワークに接続してください。</translation>
+<translation id="5027188696592292896">共有できます</translation>
+<translation id="5737164735602202642">安全な接続を確立中…</translation>
+<translation id="7327232760987881796">ファイルの受信要求 — 承認前にコードを確認してください</translation>
+<translation id="5813147605491386311">両方のデバイスのコードを確認して続行してください</translation>
+<translation id="674352937515546162">相手のデバイスを待っています…</translation>
+<translation id="9160972414642256993">ファイルを受信中…</translation>
+<translation id="2720604938272916375">ファイルを送信中…</translation>
+<translation id="3580456221777141248">転送完了</translation>
+<translation id="3834935128831710195">転送が拒否されました</translation>
+<translation id="558345155424485441">転送がキャンセルされました</translation>
+<translation id="8371969725114387366">転送に失敗しました。接続、空き容量、ファイルの権限を確認して再試行してください。</translation>
+<translation id="5336482190349592693">コードが一致 — 続行</translation>
+<translation id="6452181791372256707">拒否</translation>
+<translation id="7658239707568436148">キャンセル</translation>
+<translation id="6002049034818931553">保存先：</translation>
+<translation id="6818978617725048861">確認コード：<ph name="CODE"/></translation>
+<translation id="3786167654761312760">ローカル探索を利用できません。ネットワークと UDP ポート 5353 を確認し、crQuickShare を再起動してください。</translation>
+<translation id="9048139735985720549">選択したファイルをこのデバイスに送信</translation>
+<translation id="8239476720121986113">ファイルを送信しました。相手から受信確認がないまま接続が閉じられました。</translation>
+<translation id="6942973706240438936">転送がタイムアウトしました。もう一度お試しください。</translation>
+<translation id="580639705303209941">近くのスマートフォンを探す</translation>
+<translation id="2522318852650576992">検索を停止</translation>
+<translation id="1786570139860190731">Bluetooth による検出補助を開始しています…</translation>
+<translation id="5225613818615099949">近くのスマートフォンに最大 2 分間信号を送信します。Bluetooth をオンにし、同じネットワークに接続してください。</translation>
+<translation id="9208413327757315813">Bluetooth による検出補助を利用できません。スマートフォンで Quick Share の受信画面を開いてください。LAN での共有は引き続き利用できます。</translation>
+  <translation id="7295294312375734147">近くの Quick Share デバイス</translation>
+  <translation id="5026581245371276479">Bluetooth のみ</translation>
+  <translation id="7108699793566969157">Bluetooth で検出しました。ファイルを送信するには同じネットワークに接続してください。</translation>
+  <translation id="5835513660254436267">Bluetooth で近くの Quick Share デバイスを検索しています。</translation>
+  <translation id="8952915576472102937">Bluetooth 検出を利用できません。ネットワークに接続すると LAN 経由での検出は引き続き利用できます。</translation>
+  <translation id="2538229999269666773">ファイル</translation>
+  <translation id="6810075817102686774">転送済みファイル</translation>
+  <translation id="7962960561507616835">転送速度</translation>
+  <translation id="4816292591240970283">残り時間（分:秒）</translation>
+<translation id="3181950488593258710">フォルダ構造は保持されます。空のフォルダはスキップされます。フォルダ内のファイルを含め、1 回につき最大 100 ファイルを転送できます。 受信側のフォルダの扱いは異なる場合があります。</translation>
+<translation id="4532845899244822526">フォルダを選択</translation>
+<translation id="9186448452346591728"><ph name="COUNT"/> 個の項目を選択済み</translation>
+</translationbundle>

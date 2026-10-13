@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE translationbundle>
+<translationbundle lang="ko">
+<translation id="5941711191222866238">최소화</translation>
+<translation id="1398853756734560583">최대화</translation>
+<translation id="3157931365184549694">복원</translation>
+<translation id="6040143037577758943">닫기</translation>
+<translation id="8181876038280848864">로컬 네트워크에서 파일을 공유합니다. Google 로그인이 필요하지 않습니다.</translation>
+<translation id="2804694785588298928">10분 동안 수신</translation>
+<translation id="8235434987148291431">수신 중지</translation>
+<translation id="4677490628742467789">파일 선택 (최대 100개)</translation>
+<translation id="7074670349438858233">주변 기기에 숨김</translation>
+<translation id="1136534526719901357">이 네트워크의 모든 사용자에게 최대 10분 동안 표시</translation>
+<translation id="953692523250483872">선택한 파일 없음</translation>
+<translation id="1219749905305551951">주변 기기</translation>
+<translation id="7989784335483577523">다른 기기에서 Quick Share를 열고 모든 사용자에게 공개하세요. 두 기기는 같은 네트워크에 있어야 합니다.</translation>
+<translation id="5027188696592292896">공유 준비 완료</translation>
+<translation id="5737164735602202642">보안 연결 중…</translation>
+<translation id="7327232760987881796">파일 수신 요청 — 수락하기 전에 코드를 확인하세요</translation>
+<translation id="5813147605491386311">두 기기의 코드를 비교한 후 계속하세요</translation>
+<translation id="674352937515546162">다른 기기를 기다리는 중…</translation>
+<translation id="9160972414642256993">파일 수신 중…</translation>
+<translation id="2720604938272916375">파일 전송 중…</translation>
+<translation id="3580456221777141248">전송 완료</translation>
+<translation id="3834935128831710195">전송 거부됨</translation>
+<translation id="558345155424485441">전송 취소됨</translation>
+<translation id="8371969725114387366">전송하지 못했습니다. 연결, 여유 공간 및 파일 권한을 확인한 후 다시 시도하세요.</translation>
+<translation id="5336482190349592693">코드 일치 — 계속</translation>
+<translation id="6452181791372256707">거부</translation>
+<translation id="7658239707568436148">취소</translation>
+<translation id="6002049034818931553">저장 위치:</translation>
+<translation id="6818978617725048861">확인 코드: <ph name="CODE"/></translation>
+<translation id="3786167654761312760">로컬 검색을 사용할 수 없습니다. 네트워크와 UDP 포트 5353을 확인한 후 crQuickShare를 다시 시작하세요.</translation>
+<translation id="9048139735985720549">선택한 파일을 이 기기로 전송</translation>
+<translation id="8239476720121986113">파일을 전송했습니다. 수신 확인 없이 상대방이 연결을 종료했습니다.</translation>
+<translation id="6942973706240438936">전송 시간이 초과되었습니다. 다시 시도해 주세요.</translation>
+<translation id="580639705303209941">주변 휴대전화 찾기</translation>
+<translation id="2522318852650576992">휴대전화 찾기 중지</translation>
+<translation id="1786570139860190731">블루투스 검색 지원을 시작하는 중…</translation>
+<translation id="5225613818615099949">최대 2분 동안 주변 휴대전화에 신호를 보냅니다. 블루투스를 켜고 같은 네트워크에 연결하세요.</translation>
+<translation id="9208413327757315813">블루투스 검색 지원을 사용할 수 없습니다. 휴대전화에서 Quick Share 수신 화면을 여세요. LAN 공유는 계속 사용할 수 있습니다.</translation>
+  <translation id="7295294312375734147">주변 Quick Share 기기</translation>
+  <translation id="5026581245371276479">블루투스로만 발견</translation>
+  <translation id="7108699793566969157">블루투스로 발견했습니다. 파일을 보내려면 같은 네트워크에 연결하세요.</translation>
+  <translation id="5835513660254436267">블루투스로 주변 Quick Share 기기를 검색하고 있습니다.</translation>
+  <translation id="8952915576472102937">블루투스 검색을 사용할 수 없습니다. 네트워크에 연결하면 LAN 검색은 계속 사용할 수 있습니다.</translation>
+  <translation id="2538229999269666773">파일</translation>
+  <translation id="6810075817102686774">전송한 파일</translation>
+  <translation id="7962960561507616835">전송 속도</translation>
+  <translation id="4816292591240970283">남은 시간(분:초)</translation>
+<translation id="3181950488593258710">폴더 구조가 유지됩니다. 빈 폴더는 건너뜁니다. 폴더 안의 파일을 포함하여 한 번에 최대 100개 파일을 전송할 수 있습니다. 수신 기기의 폴더 처리 방식은 다를 수 있습니다.</translation>
+<translation id="4532845899244822526">폴더 선택</translation>
+<translation id="9186448452346591728">항목 <ph name="COUNT"/>개 선택됨</translation>
+</translationbundle>

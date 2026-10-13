@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE translationbundle>
+<translationbundle lang="zh-CN">
+<translation id="5941711191222866238">最小化</translation>
+<translation id="1398853756734560583">最大化</translation>
+<translation id="3157931365184549694">还原</translation>
+<translation id="6040143037577758943">关闭</translation>
+<translation id="8181876038280848864">在局域网内分享文件，无需登录 Google。</translation>
+<translation id="2804694785588298928">接收 10 分钟</translation>
+<translation id="8235434987148291431">停止接收</translation>
+<translation id="4677490628742467789">选择文件（最多 100 个）</translation>
+<translation id="7074670349438858233">对附近设备隐藏</translation>
+<translation id="1136534526719901357">在此网络中对所有人可见，最长 10 分钟</translation>
+<translation id="953692523250483872">未选择文件</translation>
+<translation id="1219749905305551951">附近的设备</translation>
+<translation id="7989784335483577523">在另一台设备上打开 Quick Share，并设为对所有人可见。两台设备必须位于同一网络。</translation>
+<translation id="5027188696592292896">准备分享</translation>
+<translation id="5737164735602202642">正在建立安全连接…</translation>
+<translation id="7327232760987881796">收到文件请求 — 接受前请核对验证码</translation>
+<translation id="5813147605491386311">请核对两台设备上的验证码后继续</translation>
+<translation id="674352937515546162">正在等待另一台设备…</translation>
+<translation id="9160972414642256993">正在接收文件…</translation>
+<translation id="2720604938272916375">正在发送文件…</translation>
+<translation id="3580456221777141248">传输完成</translation>
+<translation id="3834935128831710195">传输已拒绝</translation>
+<translation id="558345155424485441">传输已取消</translation>
+<translation id="8371969725114387366">传输失败。请检查网络连接、可用空间和文件权限，然后重试。</translation>
+<translation id="5336482190349592693">验证码一致 — 继续</translation>
+<translation id="6452181791372256707">拒绝</translation>
+<translation id="7658239707568436148">取消</translation>
+<translation id="6002049034818931553">保存到：</translation>
+<translation id="6818978617725048861">验证码：<ph name="CODE"/></translation>
+<translation id="3786167654761312760">局域网发现不可用。请检查网络和 UDP 5353 端口，然后重启 crQuickShare。</translation>
+<translation id="9048139735985720549">向此设备发送所选文件</translation>
+<translation id="8239476720121986113">文件已发送。对方关闭了连接，但未返回送达确认。</translation>
+<translation id="6942973706240438936">传输超时，请重试。</translation>
+<translation id="580639705303209941">查找附近手机</translation>
+<translation id="2522318852650576992">停止查找手机</translation>
+<translation id="1786570139860190731">正在启动蓝牙发现辅助…</translation>
+<translation id="5225613818615099949">正在通知附近手机，最长持续 2 分钟。请开启蓝牙并连接同一网络。</translation>
+<translation id="9208413327757315813">蓝牙发现辅助不可用。请在手机上打开 Quick Share 接收界面；局域网分享仍可使用。</translation>
+  <translation id="7295294312375734147">附近的 Quick Share 设备</translation>
+  <translation id="5026581245371276479">仅蓝牙发现</translation>
+  <translation id="7108699793566969157">已通过蓝牙发现。请连接同一网络以发送文件。</translation>
+  <translation id="5835513660254436267">正在通过蓝牙搜索附近的 Quick Share 设备。</translation>
+  <translation id="8952915576472102937">蓝牙发现不可用。连接网络后仍可通过局域网发现设备。</translation>
+  <translation id="2538229999269666773">文件</translation>
+  <translation id="6810075817102686774">已传输文件</translation>
+  <translation id="7962960561507616835">传输速度</translation>
+  <translation id="4816292591240970283">剩余时间（分:秒）</translation>
+<translation id="3181950488593258710">文件夹保留目录结构，空文件夹将跳过。每次最多传输 100 个文件，包括文件夹内的文件。 接收端可能采用不同的目录处理方式。</translation>
+<translation id="4532845899244822526">选择文件夹</translation>
+<translation id="9186448452346591728">已选择 <ph name="COUNT"/> 个项目</translation>
+</translationbundle>

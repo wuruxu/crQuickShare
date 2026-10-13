@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE translationbundle>
+<translationbundle lang="pt-PT">
+<translation id="5941711191222866238">Minimizar</translation>
+<translation id="1398853756734560583">Maximizar</translation>
+<translation id="3157931365184549694">Restaurar</translation>
+<translation id="6040143037577758943">Fechar</translation>
+<translation id="8181876038280848864">Partilhe ficheiros na rede local sem iniciar sessão no Google.</translation>
+<translation id="2804694785588298928">Receber durante 10 minutos</translation>
+<translation id="8235434987148291431">Parar de receber</translation>
+<translation id="4677490628742467789">Escolher ficheiros (até 100)</translation>
+<translation id="7074670349438858233">Oculto para dispositivos próximos</translation>
+<translation id="1136534526719901357">Visível para todos nesta rede durante um máximo de 10 minutos</translation>
+<translation id="953692523250483872">Nenhum ficheiro selecionado</translation>
+<translation id="1219749905305551951">Dispositivos próximos</translation>
+<translation id="7989784335483577523">Abra o Quick Share no outro dispositivo e selecione a visibilidade para todos. Ambos os dispositivos devem estar na mesma rede.</translation>
+<translation id="5027188696592292896">Pronto para partilhar</translation>
+<translation id="5737164735602202642">A estabelecer ligação segura…</translation>
+<translation id="7327232760987881796">Ficheiros recebidos — verifique o código antes de aceitar</translation>
+<translation id="5813147605491386311">Compare o código nos dois dispositivos antes de continuar</translation>
+<translation id="674352937515546162">A aguardar o outro dispositivo…</translation>
+<translation id="9160972414642256993">A receber ficheiros…</translation>
+<translation id="2720604938272916375">A enviar ficheiros…</translation>
+<translation id="3580456221777141248">Transferência concluída</translation>
+<translation id="3834935128831710195">Transferência recusada</translation>
+<translation id="558345155424485441">Transferência cancelada</translation>
+<translation id="8371969725114387366">A transferência falhou. Verifique a ligação, o espaço disponível e as permissões dos ficheiros e tente novamente.</translation>
+<translation id="5336482190349592693">Códigos iguais — continuar</translation>
+<translation id="6452181791372256707">Recusar</translation>
+<translation id="7658239707568436148">Cancelar</translation>
+<translation id="6002049034818931553">Guardar em:</translation>
+<translation id="6818978617725048861">Código de verificação: <ph name="CODE"/></translation>
+<translation id="3786167654761312760">A descoberta local não está disponível. Verifique a rede e a porta UDP 5353 e reinicie o crQuickShare.</translation>
+<translation id="9048139735985720549">Enviar os ficheiros selecionados para este dispositivo</translation>
+<translation id="8239476720121986113">Ficheiros enviados. O outro dispositivo fechou a ligação sem confirmar a receção.</translation>
+<translation id="6942973706240438936">O tempo limite da transferência foi excedido. Tente novamente.</translation>
+<translation id="580639705303209941">Procurar telemóveis próximos</translation>
+<translation id="2522318852650576992">Parar procura</translation>
+<translation id="1786570139860190731">A iniciar a ajuda de deteção por Bluetooth…</translation>
+<translation id="5225613818615099949">A enviar um sinal aos telemóveis próximos durante até 2 minutos. Ative o Bluetooth e mantenha a ligação à mesma rede.</translation>
+<translation id="9208413327757315813">A ajuda por Bluetooth está indisponível. Abra o ecrã de receção do Quick Share no telemóvel. A partilha pela rede local continua disponível.</translation>
+  <translation id="7295294312375734147">Dispositivo Quick Share próximo</translation>
+  <translation id="5026581245371276479">Apenas Bluetooth</translation>
+  <translation id="7108699793566969157">Detetado por Bluetooth. Ligue-se à mesma rede para enviar ficheiros.</translation>
+  <translation id="5835513660254436267">A procurar dispositivos Quick Share próximos por Bluetooth.</translation>
+  <translation id="8952915576472102937">A deteção por Bluetooth não está disponível. A deteção pela rede local continua disponível quando estiver ligado a uma rede.</translation>
+  <translation id="2538229999269666773">Ficheiro</translation>
+  <translation id="6810075817102686774">Ficheiros transferidos</translation>
+  <translation id="7962960561507616835">Velocidade de transferência</translation>
+  <translation id="4816292591240970283">Tempo restante (min:s)</translation>
+<translation id="3181950488593258710">A estrutura das pastas é preservada. As pastas vazias são ignoradas. Até 100 ficheiros por transferência, incluindo os ficheiros nas pastas. O destinatário pode tratar as pastas de outra forma.</translation>
+<translation id="4532845899244822526">Escolher pasta</translation>
+<translation id="9186448452346591728"><ph name="COUNT"/> item(ns) selecionado(s)</translation>
+</translationbundle>
