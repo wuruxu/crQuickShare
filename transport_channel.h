@@ -34,6 +34,9 @@ class TransportChannel {
   virtual Ready Wait(bool read, bool write, int timeout_ms) = 0;
   virtual void Close() = 0;
   virtual const char* name() const = 0;
+  // Asynchronous connection bridges retain their setup failure separately
+  // from an established peer closing the stream. Safe to call on the worker.
+  virtual std::string connection_error() const;
 };
 
 struct ChannelConnectResult {
@@ -51,5 +54,10 @@ ChannelConnectResult ConnectTcpChannel(const std::string& address, uint16_t port
                                       const std::function<bool()>& active,
                                       const std::string& local_address = {},
                                       unsigned interface_index = 0);
+// Upgrade credentials contain four network-order IPv4 bytes, not IP text.
+// Only directly attached unicast peers are accepted; bind the selected route.
+ChannelConnectResult ConnectLanUpgradeChannel(const std::string& address, int port,
+                                             base::TimeTicks deadline,
+                                             const std::function<bool()>& active);
 }  // namespace crquickshare
 #endif

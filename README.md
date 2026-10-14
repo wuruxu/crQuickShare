@@ -26,6 +26,69 @@ mDNS 组播、清除旧网络发现缓存并恢复查询和接收广播。没有
 失败，不提供断点续传。路由器 AP 隔离、组播过滤和主机防火墙会影响发现与传输；需要
 UDP 5353 和应用实际监听的 TCP 端口可达。不会自动修改防火墙。
 
+## crFiles Linux 蓝牙接收（第一阶段）
+
+crFiles 开启 Quick Share 接收后，`BluetoothReceiver` 在 UI 序列注册 NearbySharing
+RFCOMM 服务和 FEF3 本地 GATT 服务；二者就绪后才广播接收入口。不依赖发送弹窗是否
+打开，不要求手机和电脑位于同一局域网。现有接收开关仍要求服务初始化成功；未接入
+独立 crQuickShare 窗口。需要本机蓝牙适配器及 BlueZ 支持外围广播和本地 GATT 服务。
+
+广播使用 20 字节 Base64URL V2 索引（一个槽位）；服务数据、UUID 和 flags 合计
+31 字节，不依赖扩展广播。手机从 FEF3 的 `00000000-0000-3000-8000-000000000000`
+只读特征获取完整普通 Nearby 广告，其中含与 LAN 一致的公开名称、端点 ID、Sharing
+salt/key hash 和本机经典蓝牙地址。服务 UUID 为
+`a82efa21-ae5c-3dde-9bbc-f16da7b16c5a`，不要求系统蓝牙配对；通信仍进行 UKEY2
+加密、匿名配对及本机接收确认，不支持自动接受。
+
+接受的 RFCOMM socket 复用 `BootstrapProbe` 的有界、事件驱动传输桥，通过
+`ReceiveBluetooth` 与 LAN 和出站请求互斥。完成或取消后恢复接收广播；忙碌时撤回广播
+并拒绝新连接，已有传输不因广播撤回而断开。关闭功能、退出、蓝牙断电会清理相应
+资源；异步创建成功但请求已经取消的 socket／广播会立即释放。
+
+蓝牙直传上限为 **72 KiB（73728 字节）**。crFiles 接收端在用户确认后，优先请求
+WIFI_LAN 升级（路径等待最多 5 秒）；已有对端主动提供的可用路径则直接尝试。
+LAN 路径使用协议中的四字节 IPv4 地址和 TCP 端口，仅连接本机活动网卡同子网的
+单播地址，并绑定对应源地址和接口。不依赖 mDNS 已经发现手机，不修改网络配置。
+TCP 建连共用 3 秒预算，LAN 建连和 introduction/排空阶段共用 10 秒预算。
+LAN 始终保留已有 UKEY2 加密上下文，不接受关闭 LAN 会话加密。
+
+LAN 路径被拒绝、没有路径或在蓝牙排空屏障之前连接失败时，如有热点连接器，
+再请求 WIFI_HOTSPOT（路径等待最多 15 秒）。使用
+`--quick-share-upgrade-interface=wlp3s0` 选择加入热点的网卡，热点连接仍共用 40 秒预算。
+已开始排空蓝牙或已经替换通道后的失败终止会话，不能安全回退。
+热点仍默认自动选择频段/信道，并在结束后恢复网络和删除临时配置。
+
+两种路径复用 TCP client introduction、蓝牙排空屏障及心跳验证；验证成功后才发送
+分享层 ACCEPT。小批次未收到升级路径时仍走蓝牙，开始直传后拒绝迟到路径。
+没有热点连接器时仍可尝试 LAN；所有可用升级路径失败时明确终止，不用蓝牙传大文件。
+文件继续使用原有路径、长度、分块、空间检查及临时批次提交机制。
+
+此接收实现支持连接 Android 提供的 LAN TCP 端点或加入其热点，不创建电脑热点，
+不实现 Wi-Fi Direct，也不在电脑端发起 LAN 监听路径提议。LAN 首版不支持 IPv6、
+跨子网路由。手机是否提供 LAN 路径取决于其实现和网络环境。出站升级策略保持热点。
+
+诊断顺序：`Bluetooth receiver listener ready` → `Bluetooth receiver GATT ready` →
+`Bluetooth receiver advertising` → `Bluetooth receiver advertisement read` →
+`Bluetooth incoming session admitted` → `bluetooth_accepted` → 握手、确认、文件传输。
+初始化失败按 15 秒间隔重试，并记录失败阶段，不输出文件正文或密钥。
+
+切换诊断：`Wi-Fi upgrade TCP ready` 标记新 TCP 建连完成；`Wi-Fi upgrade introduction IO`
+记录 introduction 写入、首次 TCP 读取和读取完成/错误（仅字节数，不输出内容）。
+`Wi-Fi upgrade verification first receive` 是切换后的首次验证读取，与前面的 introduction
+回包分开统计。验证摘要含 `wait_calls`、`readable_events`、`read_would_block`，用于
+区分从未出现可读通知与可读后读取返回 would-block；这些应用层统计不能代替抓包。
+蓝牙关闭回调记录 `close_elapsed_ms`、关闭时 `read_pending` 及关闭后的读取回调。
+桥接日志 `session` 在入站连接中关联接收会话，出站/独立探测为 0（未关联）。
+`Sharing response queued` 标记 ACCEPT 等响应入队，不代表对端已收到。
+以上日志不改变心跳验证、ACCEPT 顺序或超时，不输出热点凭据及文件正文。
+
+
+已有实机日志验证蓝牙发现、加密握手、文本和热点文件接收；LAN 升级本次未编译，
+未新增单测，尚待实机验证。验收时让手机和电脑处于同一子网，发送超过 72 KiB 的
+文件，检查 `medium=WIFI_LAN`、`lan_channel_ready`、`encryption_retained=1` 和
+`delivery_confirmed=1`，并比较文件内容。再用不同网络验证热点回退，检查取消、拒绝、
+连续接收，以及旧蓝牙通道排空后的失败不会再次尝试升级。
+
 ## Linux BLE 设备发现
 
 主窗口可见且没有传输或文件选择对话框时，通过 Chromium BluetoothAdapter / BlueZ
@@ -266,6 +329,43 @@ out/crquickshare/crQuickShare --device-name=Office --receive-dir=/home/user/Down
 
 ### 网络恢复与错误诊断
 
+Linux 热点连接输出 `Hotspot join stage`，每个阶段有 `event=started` 和
+`event=finished`，结束记录包含 `success`、本阶段 `stage_elapsed_ms`、从连接器入口
+累计的 `elapsed_ms` 和 `deadline_expired`。开始记录的 `remaining_ms` 表示原有总截止
+时间的剩余预算；计时使用单调时钟，所有 NM 方法调用与激活等待共用总截止时间。
+阶段依次为 `validate_credentials`、`check_wifi_device`、`read_previous_connection`、
+`create_profile`、`activate_connection`、`check_local_address`、
+`connect_tcp`。其中 `create_profile` 调用 NM D-Bus `AddAndActivateConnection2`；
+`activate_connection` 等待 ActiveConnection 进入 ACTIVATED 状态，
+包含 Wi-Fi 关联、认证和 IP 配置，不能单凭此项区分扫描与 DHCP；
+`check_local_address` 是激活完成后的本机同子网地址检查，不是 DHCP 等待时间。
+`connect_tcp` 单独统计绑定该接口和地址的 TCP 建连耗时。提前返回时当前阶段记录
+`success=0`（也可能是取消），最终 `Hotspot join timing` 汇总连接器结果与总耗时，
+不包含后续协议切换、文件传输和网络恢复。日志不输出 SSID、密码或 D-Bus 错误正文。
+
+热点凭据的 `frequency` 透传到 Linux 后端，仅用于诊断。热点连接默认自动选择
+频段和信道：不向 NM 配置写入 `band` 或 `channel`，而非写入字面值 `auto`。
+`Hotspot frequency hint` 保留协议原值，记录 `applied=0; band=auto; channel=0`。
+不再先固定信道等待 12 秒后递归回退；激活、地址检查和 TCP 建连共用原始
+40 秒截止时间，并保留取消检查及失败后的网络清理。该策略共用于发送和接收升级。
+实际耗时及成功率仍需多轮实机对比。
+`Hotspot NM state` 记录设备状态、原因和活动连接状态；`Hotspot NM scan` 记录
+LastScan 变化及相对耗时（初始样本不是本次扫描完成事件）。诊断最多每 500 ms 采样，
+单次诊断预算 100 ms；短暂状态可能漏采。NM 的 `wifi_config` 包含扫描、关联和认证，
+这些子阶段仍需结合 supplicant 系统日志分析。不额外请求扫描。
+
+热点后端直接使用系统 D-Bus，不启动 nmcli、不创建密码文件。连接配置使用
+`persist=volatile`、`bind-activation=dbus-client`，由每次升级独立的私有 D-Bus 连接
+持有生命周期；密码只通过 D-Bus 传给 NM。传输线程以最多 50 ms 的 D-Bus 等待片段
+处理回复，并轮询激活状态，期间继续处理蓝牙心跳和取消。首次连接本机系统总线
+使用 libdbus 的同步连接过程。
+
+清理时先检查接口当前的 ActiveConnection；若已经切换到其他连接，则保留它，
+否则尝试激活之前的配置，并等待激活完成。随后删除本次临时配置；NM 已自动删除
+的配置也视为清理完成。取消时尚未收到的激活回复会在清理阶段短暂等待；无法确认
+归属时关闭私有总线，让 NM 释放绑定的热点连接，并保留网络清理未完成提示，
+不会盲目切换网络。异常退出时客户端绑定也会释放热点，但不保证恢复原 Wi-Fi。
+
 `Network discovery reset` 记录接口变化、网络通知、休眠恢复与重建结果。验证时应覆盖
 启动时断网、切换 Wi-Fi、拔插网线、休眠恢复，以及失败后再次分享，确认无需重启应用
 即可恢复设备发现和接收广播。接口索引、IPv4 地址和掩码不变且 socket 正常时，网络通知
@@ -358,7 +458,7 @@ python3 crQuickShare/tools/validate_resources.py
 - `ConnectionListener` / `CreateConnectionListener`：监听端口及有界等待接收连接，返回 `TransportChannel`，不暴露 socket 描述符。协议服务仍负责接收开关、并发会话与来源策略。
 - `FileStorage` / `CreateFileStorage`：递归收集并保留已打开的发送文件；创建 `ReceiveBatch` 管理接收文件写入、刷盘、整批不覆盖提交和失败清理。接收批次关闭句柄后才清理暂存目录；提交成功但父目录持久性未确认时单独报告，不撤销成功结果。文件读写采用跨平台 `base::File`，原生目录操作只在后端。
 
-Linux 后端分别位于 `lan_discovery_linux.cc`、`transport_channel_linux.cc`、`file_storage_linux.cc`。GN 按平台选择后端，Windows/macOS 已加入 `platform_socket.cc`、`lan_discovery_desktop.cc`、`transport_channel_desktop.cc` 和各自的文件保存后端，并接入 crFiles 的发送窗口、后台接收及设置页面。独立 crQuickShare 窗口与 BLE 仍只在 Linux 启用。协议服务不直接调用原生网络和目录 API。
+Linux 后端分别位于 `lan_discovery_linux.cc`、`transport_channel_linux.cc`、`file_storage_linux.cc`。GN 按平台选择后端，Windows/macOS 已加入 `platform_socket.cc`、`lan_discovery_desktop.cc`、`transport_channel_desktop.cc` 和各自的文件保存后端，并接入 crFiles 的发送窗口、后台接收及设置页面。独立 crQuickShare 窗口仍只在 Linux 启用；crFiles 的 BLE 已接入 Linux 和 Windows，Windows 验证范围见文末。协议服务不直接调用原生网络和目录 API。
 
 Windows 使用 Winsock、GetAdaptersAddresses 和句柄重命名提交；当前仅支持本地磁盘路径，拒绝 UNC、重解析点、保留名称及大小写冲突。文件刷盘后提交，但不声称父目录已持久化。macOS 使用 BSD sockets、getifaddrs、openat 与 renameatx_np(RENAME_EXCL)，拒绝文件系统大小写／Unicode 别名造成的目录合并。macOS Bonjour 服务清单已加入 Quick Share 服务类型；沿用 crFiles 的局域网权限与文件夹授权。
 
@@ -406,3 +506,201 @@ Linux BLE 合并要求端点 ID、16 字节盐与元数据密钥哈希，以及�
 IP／端口、端点 ID 及匹配布尔值，不输出名称、盐、密钥材料或原始广播。mDNS summary 的
 lan_candidates 包括匿名候选，visible_peers 仅统计 LAN 自身已有公开名称的记录，不含
 UI 层通过 BLE 补全的设备。尚未编译或实机验证。
+
+### Linux 蓝牙连接引导与热点升级
+
+基础探测仍通过以下命令启用；端点 ID 必须取自目标当前广播，不能把示例当作永久设备 ID：
+
+```sh
+out/debian/crFiles --quick-share-bootstrap-endpoint=394E374F
+```
+
+打开 crFiles 的 Quick Share 设备列表，手机保持接收页面。只使用未过期、含公开名称且
+明确提供经典蓝牙 MAC 的广播／GATT 记录，不使用随机 BLE 地址猜测连接入口。
+已有用户日志验证经典蓝牙服务连接、UKEY2 和匿名配对成功。握手不等于身份已验证。
+基础模式只提供蓝牙介质，不修改电脑网络，每次启动一次，45 秒总期限。
+
+实际 Wi-Fi 热点升级需要额外明确选择 NetworkManager 管理的无线接口：
+
+```sh
+out/debian/crFiles --quick-share-bootstrap-endpoint=394E374F --quick-share-upgrade-interface=wlp3s0
+```
+
+这会允许临时断开该接口原来的 Wi-Fi 并加入手机提供的热点。手机不需要先加入电脑的
+局域网，但必须提供 WIFI_HOTSPOT 升级路径。依赖运行中的 NetworkManager、系统 D-Bus
+及当前用户创建／激活连接的权限；不需要 nmcli、辅助脚本或修改 NetworkManager，
+不会自动 sudo 或安装依赖。接口无效时热点后端不可用；NM 调用失败会报告升级失败，
+不能悄悄当作升级成功。带 bootstrap-endpoint 的命令仍仅做连接验证，
+不向手机发送附件。电脑创建热点、Wi-Fi Direct、Windows/macOS 热点升级后端尚未实现；Windows 的 WIFI_LAN 升级见文末。
+
+crFiles 的正式发送界面也支持有公开名称及经典蓝牙连接地址的 BLE-only 设备。
+这些设备可以通过蓝牙发送小文件，不要求本机具备热点后端；大文件会在连接前检查热点后端。
+正式发送不需要 bootstrap-endpoint 参数；可以只指定 --quick-share-upgrade-interface=wlp3s0。
+未指定时仅在 /sys/class/net 中存在唯一无线接口时自动选择（允许当前未连接 Wi-Fi）；
+多无线接口环境需要显式选择。点击 Send 后先完整检查源文件，再启动蓝牙连接，通过
+蓝牙发送文件介绍并完成验证码和接收确认，让手机无需等待热点连接即可显示接收提示。
+源文件总大小不超过 72 KiB（包含零字节文件）时，正式发送保留加密经典蓝牙通道，
+双方确认后直接发送文件；阈值按整批文件总大小计算，不按单个文件计算。
+此策略在握手前选定，仅声明蓝牙介质，不请求热点升级；对手机主动提供的升级路径
+回复 UPGRADE_FAILURE 并保留蓝牙。不会在文件发送途中自动升级或重发。
+大于 72 KiB 时双方确认后再进行热点升级和通道往返验证；升级期间显示连接中，
+验证通过才发送文件内容。小文件蓝牙直传的对端兼容性仍需实机验证。原 LAN 发送路径
+保留。每个发送会话固定本地 endpoint，不因加网期间的发现重置而改变。
+
+`Transfer medium selected` 记录会话选择的介质、总字节数及蓝牙阈值；
+`Sending files` 记录实际发送介质。蓝牙直传保留底层发送回调之前的待写记录，
+文件进度、最终分块完成和后续交付判断不再把桥接队列写入当作 socket 发送完成。
+确认、取消、心跳和交付确认沿用现有逻辑；socket 发送完成本身不代表手机已保存文件。
+诊断用 bootstrap-endpoint 探测仍验证热点，不受小文件策略影响。
+
+蓝牙桥接通过事件推进，不再用 10 ms 定时器检查队列或复制会话快照。
+工作线程写入数据、读空接收缓冲区、请求关闭，以及 UI 线程收到发送完成回调时，
+都会安排一次可合并的 UI 处理任务；工作线程仍通过条件变量等待数据和可写空间。
+GATT 释放后用一次性通知启动等待中的经典蓝牙连接；会话完成网络清理并释放 busy
+后通知桥接结束。取消会使已排队的 UI 弱回调失效。超时保护仍保留，经典蓝牙设备
+发现回退的 100 ms 查询也仍保留，它不参与数据收发。
+
+BLE discovery readiness 日志分别记录首次发现候选和首次具备公开名称、经典蓝牙地址
+的候选距扫描启动的耗时，帮助区分匿名广播等待与连接耗时；不代表界面已经完成绘制。
+发送期间暂停 BLE 扫描时保留已有广播和 GATT 记录，完成后可以立即恢复尚未过期的设备。
+暂停不刷新记录时间，仍按原来的 120 秒寿命过期；关闭发现界面或蓝牙不可用时清空缓存。
+GATT 调度优先处理已知但缺少公开名称或经典蓝牙地址的端点，其次处理未知头部，
+最后刷新已具备发送信息但读取不完整的候选。只有同一头部已完整读取、读取缓存尚未
+过期、且所有已知端点都能通过协议 discovery key、endpoint ID 和兼容头部关联到
+完整发送信息时，才跳过重复补全。不凭设备名称、BLE 地址或头部 bloom/hash 猜测关联；
+首次出现、头部变化、部分读取仍需补全，完整读取在缓存到期前 15 秒恢复刷新；
+持续广播不延长已读槽位的有效期。
+连接／读取连续失败使用 30、60、120 秒的有界退避；成功重置失败次数，头部变化按
+原有至少 5 秒尝试间隔重新评估，暂停或取消不累计失败。已发起但尚未返回的底层连接
+仍串行等待，避免堆积无法取消的操作。
+诊断包括 `BLE GATT resolution skipped`、`BLE GATT candidate selected`、
+`BLE GATT retry deferred`，以及发送前实际等待的 `gatt_wait_ms`；summary 中
+`gatt_ready_skips` 统计跳过状态进入次数，不累计每次调度 tick。
+
+设备移除和地址变更仍会淘汰对应记录。readiness 日志的 record_age_ms 和
+retained_before_scan 区分恢复的缓存记录与本轮新发现，cache retention 日志标记暂停状态。
+
+若 BlueZ 尚无目标经典蓝牙设备对象且不提供 Adapter1.ConnectDevice，连接桥会回退到
+最多八秒的经典蓝牙发现，仅按协议携带的目标地址匹配，再连接 Quick Share 服务。
+该回退不主动配对；目标必须能够被经典蓝牙发现。诊断日志包含 classic discovery
+fallback 和 classic discovery matched，连接建立失败按蓝牙连接错误报告。
+
+启用后 ConnectionRequest 和路径请求声明 WIFI_HOTSPOT 客户端角色；收到匹配的
+UPGRADE_PATH_AVAILABLE 后：
+
+1. 校验 SSID、WPA 密码、IPv4 网关及端口。创建不保存到磁盘、不自动连接的 NM 配置；
+   密码直接通过系统 D-Bus 提供，不写临时文件或日志。禁用该配置的默认
+   路由和自动 DNS。当前支持 8–63 字节口令，控制字符、二进制 SSID 及 IPv6 网关不支持。
+2. 加入网络后复核网关与新接口 IPv4 同子网，绑定该接口及源地址连接热点 TCP 端口。
+   加网期间继续处理原蓝牙通道的心跳和控制消息。网络连接／介绍／旧通道排空共限 40 秒。
+3. 在新 TCP 通道发送明文 CLIENT_INTRODUCTION，按对端声明等待可选的介绍 ACK。
+   ACK 允许上游使用的只有事件类型、没有空消息体的编码。介绍帧中的
+   supports_disabling_encryption 与原加密通道收到的升级路径保持一致。
+4. 在旧加密蓝牙通道交换 LAST_WRITE_TO_PRIOR_CHANNEL 和 SAFE_TO_CLOSE_PRIOR_CHANNEL，
+   等待本机蓝牙 socket 实际写完关闭屏障，再交换可选的明文 DISCONNECTION（最多 2 秒），
+   不推进加密序列号。关闭内存队列后由 UI 线程实际断开蓝牙 socket，不等待整个探测结束。
+   只有切换到新通道后才应用协商模式：该标志为 true 时收发明文 Nearby 帧（不再有
+   UKEY2 消息层保护），为 false 或缺失时沿用原 UKEY2 上下文及序列号。旧通道的加密
+   不受影响，绝不通过解密失败自动降级。正式 BLE 发送使用相同的协商策略。
+5. 切换到 WIFI_HOTSPOT 后按协商模式发送心跳，最多等 15 秒验证匹配的应答。
+   结果分开记录 handshake_success、upgrade_completed、channel_round_trip 和
+   encrypted_round_trip。明文模式成功时 channel_round_trip=1、encrypted_round_trip=0、
+   negotiated_plaintext=1，不代表加密验证成功。诊断随后结束并恢复网络；正式发送则继续
+   文件传输，成功、拒绝、取消或失败后关闭通道、恢复网络，再释放 busy 状态。
+
+若在通道关闭屏障前失败，发 UPGRADE_FAILURE，仍能在蓝牙通道清理；屏障开始后失败则
+终止会话，不能假装恢复应用数据发送而破坏加密顺序。结束时删除临时 NM 配置，并且仅在
+接口仍由本次操作控制或已断开时尝试恢复原配置，不覆盖用户中途选择的新网络。恢复和
+删除各有结果日志；清理失败会记录临时配置 UUID，便于人工处理。强制杀进程／关机可能
+打断恢复，因此验证时应等待网络恢复日志后退出。整个升级探测总期限为 120 秒，取消后
+网络恢复在工作线程继续进行，不阻塞 UI。
+
+经典蓝牙探测等待当前 GATT 请求及尚未返回的连接回调结束，探测及网络清理期间暂停
+新的 GATT 请求。目标消失或停止发现时解除等待。GATT 长度不足时每槽完整重读一次，
+不拼接不同快照；失败保留旧槽位的原到期时间。日志包含槽位、声明／实际长度和特征缺失
+原因，遍历完成但有失败记为 partial。22 字节值的底层原因尚未确定。
+
+GATT 诊断按 `request` 和 BLE `address` 关联：`connect requested` 记录请求时的
+`gatt_connected`、`services_complete`；`connect callback` 记录回调耗时、错误码、
+连接对象状态和 `stale`（请求已结束或暂停后的迟到回调）。迟到回调仍保持原来的
+丢弃行为。`services discovered` 单独记录服务发现通知及距请求开始的时间。
+`BLE GATT stage` 只在阶段变化时输出，阶段为 `connect_callback`（等待连接回调）、
+`wait_services`（等待服务就绪）、`find_service`、`read_characteristic`、`process_read`。
+结束日志包含当前阶段、阶段耗时、总耗时、设备存在性、连接状态及服务就绪状态，
+便于区分连接回调未返回、服务解析未完成和特征读取未返回。每次特征读取记录槽位、
+回调耗时、字节数及错误码；解析成功后记录 endpoint ID，将 GATT 请求关联到端点。
+地址和 endpoint ID 都不是经过认证的永久设备身份；日志不输出设备名称或原始数据。
+这些诊断不改变发现、超时、重试和缓存策略。
+
+GATT 恢复：周期检查发现已有连接断开时，以 `outcome=disconnected` 结束请求，
+保留已成功读取的有效槽位，不再等待完整的 15 秒请求期限。连接回调尚未返回时
+仍禁止启动另一个连接，避免堆积未完成的底层操作；`BLE GATT scheduler blocked`
+每五秒最多记录一次阻塞请求、地址、等待时间及候选数。
+Chromium Linux BlueZ 的 GATT 建连使用新增的 `ConnectWithTimeout`，将 D-Bus
+回复等待限定为 20 秒。应用请求先在 15 秒结束时，随后收到的回调标记 `stale=1`，
+但仍释放对应 pending 状态，允许后续候选调度。普通 Connect 和配对保留原超时。
+这不是对 bluetoothd 操作的强制取消，也不主动断开其他客户端可能使用的已配对连接；
+服务解析仍可能失败。此公共后端调整影响 Linux BlueZ GATT 调用者，不限于 crQuickShare。
+
+无可用路径或没有响应仍不能证明手机不支持热点。仓库 Nearby 能构造 UPGRADE_PATH_REQUEST，
+但该版本接收分支不完整；Android 实现可能不同。实现也接受手机主动提供的热点路径，
+不依赖对路径请求一定有回复。网络凭据只用于本次连接，诊断不打印 SSID、密码或原始帧。
+
+用户提供的实机日志已验证热点升级、协商明文模式的匹配心跳 ACK，以及网络恢复和配置
+清理成功。正式头像发送接入仅做源码和差异检查，未编译，仍需验证实际文件传输、拒绝和
+取消；连接探测成功不等于这些文件传输场景均已验证。
+
+crFiles 的可发送 BLE 设备使用 endpoint ID 与协议提供的经典蓝牙地址作为界面路由键，
+与 SameBluetoothRoute 的合并条件一致，不再把会轮换的 endpoint_info 用于该键。
+点击发送时仍从当前有效发现结果取得最新凭据；不复用过期记录、不按名称回退匹配，
+也不将路由键作为认证身份。发送前拒绝输出 `Send rejected before session`，
+包含 adapter、bluetooth_sender 或 bluetooth_service 层的 reason，不输出文件名或凭据。
+
+热点升级后的通道验证使用独立重试调度：立即发送首个 ping，随后按前一个 ping
+完整写出后的 500/1000/2000 ms 间隔最多重试三次（共四个 ping）。输出阻塞时
+不会累计排队重试。验证总窗口仍为 15 秒，任何已完整写出的验证序号收到匹配 ACK
+即可通过；对端主动心跳只触发正常回复，不替代匹配 ACK 验证。
+验证期间暂停普通定时心跳发送，结束后恢复协商间隔，取消和失败退出验证循环。
+`Wi-Fi upgrade verification retry queued` 记录重试序号、次数和间隔，验证汇总增加
+`retries` 与 `elapsed_ms`，便于比较首次 ACK 缺失时的等待时间。
+
+## Windows Bluetooth and LAN upgrade
+
+The Windows crFiles adapter now includes BLE discovery/GATT slot reads, Fast
+Initiation service-data advertising, classic Bluetooth sending and receiving,
+and Bluetooth-to-WIFI_LAN migration. Existing LAN transfers remain available.
+This implementation has not been compiled or tested on Windows hardware in this
+change; no unit tests were added.
+
+The receiver uses a native WinRT GattServiceProvider for FEF3 and a static,
+read-only Nearby discovery slot. Windows handles read offsets. Advertising uses
+GattServiceProviderAdvertisingParameters.ServiceData (Windows 10 version 1903
+or newer) and requires a controller supporting the peripheral role. Only the
+Started state is accepted; StartedWithoutAllAdvertisementData is a setup failure.
+The GATT provider is stopped on disable/power loss, and advertising is withdrawn
+while the shared service is busy. Setup failures are logged and retried after
+15 seconds. No hotspot credentials or file contents are logged.
+
+RFCOMM uses the protocol-provided classic address and NearbySharing service UUID
+through Winsock SDP resolution, without requiring a WinRT device cache entry.
+Connections are nonblocking with an 8-second deadline and cancellation checks.
+The receiver explicitly permits uncached incoming peers only for this listener;
+Nearby UKEY2 and user confirmation still authenticate/authorize the transfer.
+The regular Chromium listener retains its existing cached-peer requirement.
+
+Small batches (at most 72 KiB) stay on Bluetooth. Larger outgoing and incoming
+batches request a LAN path, validate a directly attached IPv4 peer, bind its
+interface/source address, and reuse introduction, old-channel barriers, retained
+UKEY2 encryption and heartbeat verification before streaming. This phase does
+not join/create a Windows hotspot or implement Wi-Fi Direct. If Android does
+not offer a reachable LAN endpoint, large Bluetooth-originated transfers fail
+explicitly. The existing LAN-first receiver path and Linux hotspot fallback are
+unchanged.
+
+Manual Windows acceptance: verify BLE discovery and small-file sending; verify
+Android discovers crFiles and sends a small file/text; then test both directions
+with a larger file on the same subnet. Check medium=WIFI_LAN,
+lan_channel_ready, encrypted_round_trip=1 and delivery_confirmed=1 and compare
+file hashes. Also exercise cancellation during connect/upgrade, rejection,
+Bluetooth off/on, app exit, and consecutive transfers. A different subnet must
+fail the LAN upgrade without changing the Windows Wi-Fi connection.

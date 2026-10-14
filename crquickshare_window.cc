@@ -239,6 +239,7 @@ class ShareView : public views::View, public ui::SelectFileDialog::Listener {
       case Phase::kIdle: break;
       case Phase::kConnecting: id = IDS_CQS_CONNECTING; break;
       case Phase::kConfirm: id = s.incoming ? IDS_CQS_INCOMING : IDS_CQS_CONFIRM; break;
+      case Phase::kRestoringNetwork: id = IDS_CQS_RESTORING_NETWORK; break;
       case Phase::kWaiting: id = IDS_CQS_WAITING; break;
       case Phase::kTransferring: id = s.incoming ? IDS_CQS_RECEIVING : IDS_CQS_SENDING; break;
       case Phase::kComplete: id = IDS_CQS_COMPLETE; break;
@@ -246,7 +247,7 @@ class ShareView : public views::View, public ui::SelectFileDialog::Listener {
       case Phase::kRejected: id = IDS_CQS_REJECTED; break;
       case Phase::kCancelled: id = IDS_CQS_CANCELLED; break;
       case Phase::kTimedOut: id = IDS_CQS_TIMED_OUT; break;
-      case Phase::kError: id = IDS_CQS_ERROR; break;
+      case Phase::kError: id = s.failure == Failure::kHotspotUnavailable ? IDS_CQS_HOTSPOT_REQUIRED : IDS_CQS_ERROR; break;
     }
     status_->SetText(Text(id));
     std::u16string details = base::UTF8ToUTF16(s.peer_name);
@@ -270,12 +271,13 @@ class ShareView : public views::View, public ui::SelectFileDialog::Listener {
       }
     }
     if (!s.received_directory.empty()) details += u"\n" + s.received_directory.LossyDisplayName();
+    if (s.network_cleanup_failed) details += u"\n" + Text(IDS_CQS_NETWORK_CLEANUP_FAILED);
     detail_->SetText(details);
     code_->SetText(s.code.empty() || !s.busy ? std::u16string() : l10n_util::GetStringFUTF16(IDS_CQS_CODE, base::UTF8ToUTF16(s.code)));
     progress_->SetValue(s.phase == Phase::kComplete ? 1.0 : s.total ? double(s.transferred) / s.total : s.files.empty() ? 0.0 : double(s.completed_files) / s.files.size());
     accept_->SetVisible(s.phase == Phase::kConfirm); reject_->SetVisible(s.phase == Phase::kConfirm);
     if (s.phase != last_phase_) { accept_->SetEnabled(true); reject_->SetEnabled(true); last_phase_ = s.phase; }
-    cancel_->SetVisible(s.busy);
+    cancel_->SetVisible(s.busy && s.phase != Phase::kRestoringNetwork);
     InvalidateLayout();
   }
   BleWakeup wakeup_;

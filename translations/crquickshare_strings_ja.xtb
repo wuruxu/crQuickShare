@@ -51,4 +51,7 @@
 <translation id="1431933172646212969">フォルダ構造は保持されます。空のフォルダはスキップされます。フォルダ内のファイルを含め、1 回につき最大 1024 ファイルを転送できます。 受信側のフォルダの扱いは異なる場合があります。</translation>
 <translation id="4532845899244822526">フォルダを選択</translation>
 <translation id="9186448452346591728"><ph name="COUNT"/> 個の項目を選択済み</translation>
+  <translation id="5125731858634756748">ネットワーク接続を復元しています…</translation>
+  <translation id="3851611281675392532">ネットワークの後処理が完了しませんでした。Wi-Fi 接続を確認してください。</translation>
+  <translation id="6873287799323878567">Wi-Fi を利用できません。Bluetooth で送信するには、ファイルの数を減らすか、小さいファイルを選択してください。</translation>
 </translationbundle>

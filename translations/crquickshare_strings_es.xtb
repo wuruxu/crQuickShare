@@ -51,4 +51,7 @@
 <translation id="1431933172646212969">Se conserva la estructura de las carpetas. Se omiten las carpetas vacías. Hasta 1024 archivos por transferencia, incluidos los de las carpetas. El receptor puede gestionar las carpetas de otra manera.</translation>
 <translation id="4532845899244822526">Elegir carpeta</translation>
 <translation id="9186448452346591728"><ph name="COUNT"/> elemento(s) seleccionado(s)</translation>
+  <translation id="5125731858634756748">Restableciendo la conexión de red…</translation>
+  <translation id="3851611281675392532">La limpieza de la red no se ha completado. Comprueba la conexión Wi-Fi.</translation>
+  <translation id="6873287799323878567">Wi-Fi no está disponible. Selecciona menos archivos o archivos más pequeños para enviarlos por Bluetooth.</translation>
 </translationbundle>

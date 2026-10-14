@@ -1,6 +1,7 @@
 // Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license.
 #include "crQuickShare/quick_share_service.h"
+#include "build/build_config.h"
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -59,6 +60,7 @@ struct QuickShareService::Impl {
     state.current_file.clear(); state.current_file_index = 0;
     state.current_file_transferred = state.current_file_total = state.completed_files = 0;
     state.bytes_per_second = 0; state.remaining_seconds = -1;
+    state.network_cleanup_failed = false;
     progress_samples.clear();
   }
   std::atomic<bool> stop{false}, cancel{false}, busy{false}, receiving{false};
@@ -67,17 +69,26 @@ struct QuickShareService::Impl {
   std::thread discovery_thread, session_thread;
   std::string name, endpoint, endpoint_info;
   base::FilePath destination;
-  struct Request { Peer peer; std::vector<base::FilePath> paths; };
+  struct Request {
+    Peer peer;
+    std::vector<base::FilePath> paths;
+    std::unique_ptr<TransportChannel> bluetooth_channel = {};
+    std::function<uint64_t()> socket_sent_bytes = {};
+    HotspotConnector hotspot = {};
+    std::function<bool()> cancelled = {};
+    std::function<void()> finished = {};
+    bool incoming = false;
+  };
   std::optional<Request> request;
   const bool receive_text;
   std::vector<QuickShareService::ReceivedText> received_texts;
   base::TimeTicks visible_until;
   struct Session;
-  Impl(std::string n, base::FilePath d, bool allow_text) : name(std::move(n)), destination(std::move(d)), receive_text(allow_text) {
+  Impl(std::string n, base::FilePath d, bool allow_text, bool start_discovery = true) : name(std::move(n)), destination(std::move(d)), receive_text(allow_text) {
     constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     for (int i = 0; i < 4; ++i) endpoint += alphabet[base::RandGenerator(36)];
     endpoint_info = MakeEndpointInfo(name);
-    discovery_thread = std::thread([this] { Discover(); });
+    if (start_discovery) discovery_thread = std::thread([this] { Discover(); });
   }
   ~Impl() {
     stop = true; cancel = true;
@@ -130,6 +141,38 @@ struct QuickShareService::Impl::Session {
   bool pairing_result_received = false;
   unsigned ignored_connection_extensions = 0;
   unsigned upgrade_retry_count = 0;
+  uint64_t transport_written_bytes = 0;
+  bool bootstrap_probe = false, upgrade_response_received = false;
+  bool bluetooth_direct = false;
+  bool lan_upgrade_enabled = false, lan_upgrade_attempted = false;
+  std::function<uint64_t()> bootstrap_sent_bytes;
+  std::string local_endpoint;
+  bool upgrade_path_received = false, upgrade_path_rejected = false;
+  nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo::Medium requested_upgrade_medium =
+      nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo::UNKNOWN_MEDIUM;
+  HotspotConnector hotspot_connector;
+  std::function<bool()> externally_cancelled;
+  std::optional<nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo> upgrade_path;
+  std::unique_ptr<UpgradeNetwork> upgrade_network;
+  bool upgrade_in_progress = false, upgrade_completed = false;
+  // Selected from the encrypted upgrade path and applied only after migration.
+  // Keep the UKEY2 context for the old channel; never infer mode from input.
+  bool channel_plaintext = false;
+  bool upgrade_local_last = false, upgrade_peer_last = false, upgrade_peer_safe = false;
+  bool upgraded_ack = false;
+  uint32_t upgraded_ping = 0;
+  std::set<uint32_t> upgrade_written_pings;
+  std::optional<uint32_t> upgrade_matched_ping;
+  base::TimeTicks upgrade_last_ping_written;
+  base::TimeTicks upgrade_tcp_ready;
+  bool upgrade_tcp_received = false;
+  uint64_t upgrade_wait_calls = 0, upgrade_readable_events = 0, upgrade_read_would_block = 0;
+  bool upgrade_verifying = false, upgrade_ping_written = false;
+  uint64_t upgrade_received_bytes = 0;
+  unsigned upgrade_records = 0, upgrade_decrypted = 0, upgrade_decode_failures = 0;
+  unsigned upgrade_plaintext_records = 0;
+  unsigned upgrade_heartbeats = 0, upgrade_unmatched_acks = 0;
+  unsigned upgrade_events = 0;
   base::TimeTicks upgrade_retry_window;
   qs::V1Frame::FrameType expected_sharing = qs::V1Frame::PAIRED_KEY_ENCRYPTION;
   base::TimeTicks finish_deadline, response_deadline;
@@ -161,6 +204,7 @@ struct QuickShareService::Impl::Session {
   std::map<int64_t, Header> received_file_headers;
   struct PendingWrite {
     std::string bytes;
+    std::optional<uint32_t> verification_ping;
     size_t offset = 0;
     std::optional<int64_t> file_id;
     bool control_payload = false;
@@ -183,6 +227,7 @@ struct QuickShareService::Impl::Session {
   Session(Impl& o, std::unique_ptr<TransportChannel> transport) : owner(o), channel(std::move(transport)) {
     static std::atomic<uint64_t> next_session{0};
     diagnostic_session = ++next_session;
+    std::lock_guard guard(owner.mutex); local_endpoint = owner.endpoint;
   }
   ~Session() {
     LOG(INFO) << "crQuickShare: Certificate diagnostics summary; outgoing=" << outgoing
@@ -235,14 +280,17 @@ struct QuickShareService::Impl::Session {
               << "; accepted=" << accepted << "; expected_sharing=" << static_cast<int>(expected_sharing);
   }
 #pragma clang diagnostic pop
-  bool Active() const { return !failed && !owner.stop && !owner.cancel && !peer_cancelled && !remote_closed && !rejected && !timed_out; }
+  bool Active() const { return !failed && !owner.stop && !owner.cancel && !peer_cancelled && !remote_closed && !rejected && !timed_out &&
+      (!externally_cancelled || !externally_cancelled()); }
   bool IoActive() const {
     return !wire_broken && !owner.stop && (finishing ? base::TimeTicks::Now() < finish_deadline : Active());
   }
   bool WireFail(const char* message, int system_error = 0, Failure category = Failure::kNetwork) {
-    if (system_error) LOG(WARNING) << "crQuickShare: Transport error; session=" << diagnostic_session
+    if (system_error || upgrade_in_progress || upgrade_completed) LOG(WARNING) << "crQuickShare: Transport error; session=" << diagnostic_session
         << "; medium=" << (channel ? channel->name() : "unconnected")
-        << "; stage=" << diagnostic_stage << "; errno=" << system_error;
+        << "; stage=" << diagnostic_stage << "; errno=" << system_error
+        << "; reason=" << message << "; buffered_bytes=" << buffer.size()
+        << "; pending_bytes=" << queued_bytes;
     wire_broken = true; return Fail(message, category);
   }
   bool SupportsAck() const { return peer_disconnect_version >= 6; }
@@ -276,7 +324,7 @@ struct QuickShareService::Impl::Session {
     size_t sent = 0; auto deadline = base::TimeTicks::Now() + base::Seconds(15);
     while (Active() && sent < bytes.size() && base::TimeTicks::Now() < deadline) {
       const auto result = channel->Write(base::span<const char>(std::string_view(bytes).substr(sent)));
-      if (result.status == TransportChannel::Status::kOk && result.bytes) { sent += result.bytes; continue; }
+      if (result.status == TransportChannel::Status::kOk && result.bytes) { sent += result.bytes; transport_written_bytes += result.bytes; continue; }
       if (result.status == TransportChannel::Status::kWouldBlock) {
         if (!WaitWritable(100)) return false;
         continue;
@@ -287,7 +335,9 @@ struct QuickShareService::Impl::Session {
     return true;
   }
   bool WaitWritable(int wait_ms) {
-    const auto ready = channel->Wait(false, true, wait_ms);
+    const bool draining_bluetooth = bluetooth_direct && !writes.empty() &&
+        writes.front().offset == writes.front().bytes.size();
+    const auto ready = channel->Wait(false, !draining_bluetooth, wait_ms);
     if (ready.system_error) return WireFail("Transport wait failed", ready.system_error);
     return true;
   }
@@ -295,13 +345,26 @@ struct QuickShareService::Impl::Session {
     size_t budget = 256 * 1024;
     while (IoActive() && !writes.empty() && budget) {
       auto& w = writes.front();
-      auto remaining = std::string_view(w.bytes).substr(w.offset);
-      const auto result = channel->Write(base::span<const char>(remaining.substr(0, budget)));
-      if (result.status == TransportChannel::Status::kWouldBlock) break;
-      if (result.status != TransportChannel::Status::kOk || !result.bytes)
-        return WireFail("Transport write failed", result.system_error);
-      w.offset += result.bytes; budget -= result.bytes; write_progress = base::TimeTicks::Now();
+      if (w.offset < w.bytes.size()) {
+        auto remaining = std::string_view(w.bytes).substr(w.offset);
+        const auto result = channel->Write(base::span<const char>(remaining.substr(0, budget)));
+        if (result.status == TransportChannel::Status::kWouldBlock) break;
+        if (result.status != TransportChannel::Status::kOk || !result.bytes)
+          return WireFail("Transport write failed", result.system_error);
+        w.offset += result.bytes; budget -= result.bytes; write_progress = base::TimeTicks::Now();
+        transport_written_bytes += result.bytes;
+      }
       if (w.offset == w.bytes.size()) {
+        // The Bluetooth bridge queues asynchronously. Retire records and
+        // report payload progress only after the socket's send callback.
+        if (bluetooth_direct && bootstrap_sent_bytes() < transport_written_bytes) break;
+        if (upgrade_verifying && w.verification_ping) {
+          upgrade_written_pings.insert(*w.verification_ping);
+          upgrade_ping_written = true;
+          upgrade_last_ping_written = base::TimeTicks::Now();
+          LOG(INFO) << "crQuickShare: Wi-Fi upgrade verification ping written; session=" << diagnostic_session
+                    << "; sequence=" << *w.verification_ping << "; socket_completed=1; peer_receipt_confirmed=0";
+        }
         if (w.file_id) {
           auto& payload = (w.control_payload ? sent_controls : sent_payloads).at(*w.file_id);
           if (!w.control_payload) {
@@ -329,13 +392,21 @@ struct QuickShareService::Impl::Session {
       uint32_t n = 0; for (int i = 0; i < 4; ++i) n = (n << 8) | uint8_t(buffer[i]);
       if (!n || n > kMaxRecord) { WireFail("Invalid frame length", 0, Failure::kProtocol); return -1; }
       if (buffer.size() < n + 4) return 0;
-      out = buffer.substr(4, n); buffer.erase(0, n + 4); return 1;
+      out = buffer.substr(4, n); buffer.erase(0, n + 4);
+      if (upgrade_verifying) ++upgrade_records;
+      return 1;
     };
     if (!IoActive()) return -1;
     int result = extract(); if (result) return result;
-    const auto ready = channel->Wait(true, !writes.empty(), wait_ms);
+    const bool draining_bluetooth = bluetooth_direct && !writes.empty() &&
+        writes.front().offset == writes.front().bytes.size();
+    const auto ready = channel->Wait(true, !writes.empty() && !draining_bluetooth, wait_ms);
+    if (upgrade_verifying) {
+      ++upgrade_wait_calls;
+      if (ready.readable) ++upgrade_readable_events;
+    }
     if (ready.system_error) { WireFail("Transport wait failed", ready.system_error); return -1; }
-    if (ready.writable && !PumpOutput()) return -1;
+    if ((ready.writable || draining_bluetooth) && !PumpOutput()) return -1;
     if (!ready.readable) return 0;
     std::array<char, kChunk> bytes;
     const auto read = channel->Read(base::span(bytes));
@@ -344,9 +415,20 @@ struct QuickShareService::Impl::Session {
                 << "; session=" << diagnostic_session << "; stage=" << diagnostic_stage;
       remote_closed = true; wire_broken = true; return -1;
     }
-    if (read.status == TransportChannel::Status::kWouldBlock) return 0;
+    if (read.status == TransportChannel::Status::kWouldBlock) {
+      if (upgrade_verifying) ++upgrade_read_would_block;
+      return 0;
+    }
     if (read.status != TransportChannel::Status::kOk || !read.bytes) {
       WireFail("Transport read failed", read.system_error); return -1;
+    }
+    if (upgrade_verifying) {
+      if (!upgrade_received_bytes)
+        LOG(INFO) << "crQuickShare: Wi-Fi upgrade verification first receive; session=" << diagnostic_session
+                  << "; bytes=" << read.bytes
+                  << "; tcp_age_ms=" << (base::TimeTicks::Now() - upgrade_tcp_ready).InMilliseconds()
+                  << "; accepted=" << accepted;
+      upgrade_received_bytes += read.bytes;
     }
     buffer.append(bytes.data(), read.bytes); return extract();
   }
@@ -359,25 +441,35 @@ struct QuickShareService::Impl::Session {
   bool Write(const nc::OfflineFrame& frame) {
     if (!crypto) return WriteRaw(frame.SerializeAsString());
     if (!IoActive()) return false;
-    auto encoded = crypto->EncodeMessageToPeer(frame.SerializeAsString());
-    if (!encoded || encoded->empty() || encoded->size() > kMaxRecord || queued_bytes + encoded->size() + 4 > 2 * kMaxRecord)
+    std::string encoded;
+    if (channel_plaintext) encoded = frame.SerializeAsString();
+    else {
+      auto encrypted = crypto->EncodeMessageToPeer(frame.SerializeAsString());
+      if (!encrypted) return WireFail("Encryption failed", 0, Failure::kProtocol);
+      encoded = std::move(*encrypted);
+    }
+    if (encoded.empty() || encoded.size() > kMaxRecord || queued_bytes + encoded.size() + 4 > 2 * kMaxRecord)
       return WireFail("Encryption failed or output queue exhausted", 0, Failure::kProtocol);
     std::string record(4, '\0');
-    for (int i = 0; i < 4; ++i) record[i] = char(encoded->size() >> (24 - 8 * i));
-    record += *encoded;
+    for (int i = 0; i < 4; ++i) record[i] = char(encoded.size() >> (24 - 8 * i));
+    record += encoded;
     if (writes.empty()) write_progress = base::TimeTicks::Now();
     queued_bytes += record.size();
-    PendingWrite pending; pending.bytes = std::move(record); writes.push_back(std::move(pending));
+    PendingWrite pending; pending.bytes = std::move(record);
+    if (upgrade_verifying && upgrade_completed && frame.v1().type() == nc::V1Frame::KEEP_ALIVE &&
+        frame.v1().has_keep_alive() && !frame.v1().keep_alive().ack() && frame.v1().keep_alive().has_seq_num())
+      pending.verification_ping = frame.v1().keep_alive().seq_num();
+    writes.push_back(std::move(pending));
     return true;
   }
   bool TickConnection() {
     if (!IoActive()) return false;
     auto now = base::TimeTicks::Now();
-    if (crypto && !finishing) {
+    if (crypto && !finishing && !upgrade_local_last) {
       if (now - last_received >= keepalive_timeout) {
         timed_out = true; return Fail("Peer heartbeat timed out");
       }
-      if (now - last_keepalive >= keepalive_interval) {
+      if (!upgrade_verifying && now - last_keepalive >= keepalive_interval) {
         auto keep = Frame(nc::V1Frame::KEEP_ALIVE);
         keep.mutable_v1()->mutable_keep_alive()->set_ack(false);
         keep.mutable_v1()->mutable_keep_alive()->set_seq_num(++keepalive_sequence);
@@ -387,26 +479,83 @@ struct QuickShareService::Impl::Session {
     }
     return PumpOutput();
   }
+  void DiagnoseUpgradePlaintext(const std::string& record) {
+    // Inspect only the first failed record, with a small parsing bound. A
+    // structurally plausible plaintext frame is not authenticated and must
+    // never be dispatched to Control() or counted as a verified heartbeat.
+    nc::OfflineFrame candidate;
+    const bool parsed = record.size() <= 4096 && candidate.ParseFromString(record) &&
+        candidate.has_version() && candidate.version() == nc::OfflineFrame::V1 &&
+        candidate.has_v1() && candidate.v1().has_type();
+    bool control_shape = false;
+    if (parsed) {
+      const auto& v = candidate.v1();
+      const int bodies = int(v.has_connection_request()) + int(v.has_connection_response()) +
+          int(v.has_payload_transfer()) + int(v.has_bandwidth_upgrade_negotiation()) +
+          int(v.has_keep_alive()) + int(v.has_disconnection()) + int(v.has_paired_key_encryption()) +
+          int(v.has_authentication_message()) + int(v.has_authentication_result()) +
+          int(v.has_auto_resume()) + int(v.has_auto_reconnect()) + int(v.has_bandwidth_upgrade_retry());
+      control_shape = bodies == 1 &&
+          ((v.type() == nc::V1Frame::KEEP_ALIVE && v.has_keep_alive()) ||
+           (v.type() == nc::V1Frame::DISCONNECTION && v.has_disconnection()) ||
+           (v.type() == nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION &&
+            v.has_bandwidth_upgrade_negotiation() && v.bandwidth_upgrade_negotiation().has_event_type()));
+    }
+    LOG(INFO) << "crQuickShare: Wi-Fi upgrade first record plaintext diagnostics; session=" << diagnostic_session
+              << "; record_bytes=" << record.size() << "; parse_limit=4096; offline_frame=" << parsed
+              << "; type=" << (parsed ? static_cast<int>(candidate.v1().type()) : -1)
+              << "; control_shape=" << control_shape << "; authenticated=0; accepted=0";
+    if (!control_shape) return;
+    const auto& v = candidate.v1();
+    if (v.type() == nc::V1Frame::KEEP_ALIVE) {
+      const auto& heartbeat = v.keep_alive();
+      LOG(INFO) << "crQuickShare: Wi-Fi upgrade plaintext heartbeat candidate; session=" << diagnostic_session
+                << "; has_ack=" << heartbeat.has_ack() << "; ack=" << heartbeat.ack()
+                << "; has_sequence=" << heartbeat.has_seq_num() << "; sequence=" << heartbeat.seq_num()
+                << "; expected_sequence=" << upgraded_ping << "; accepted=0";
+    } else if (v.type() == nc::V1Frame::DISCONNECTION) {
+      const auto& disconnect = v.disconnection();
+      LOG(INFO) << "crQuickShare: Wi-Fi upgrade plaintext disconnect candidate; session=" << diagnostic_session
+                << "; has_request=" << disconnect.has_request_safe_to_disconnect()
+                << "; request=" << disconnect.request_safe_to_disconnect()
+                << "; has_ack=" << disconnect.has_ack_safe_to_disconnect()
+                << "; ack=" << disconnect.ack_safe_to_disconnect() << "; accepted=0";
+    } else {
+      LOG(INFO) << "crQuickShare: Wi-Fi upgrade plaintext upgrade candidate; session=" << diagnostic_session
+                << "; event=" << static_cast<int>(v.bandwidth_upgrade_negotiation().event_type())
+                << "; accepted=0";
+    }
+  }
   int ReadWire(nc::OfflineFrame& frame, int wait_ms = 100) {
     if (!TickConnection()) return -1;
     std::string data; int result = ReadRaw(data, wait_ms); if (result != 1) return result;
-    if (crypto) {
+    if (crypto && !channel_plaintext) {
       auto decoded = crypto->DecodeMessageFromPeer(data);
       if (!decoded) {
+        if (upgrade_verifying) {
+          ++upgrade_decode_failures;
+          if (upgrade_records == 1) DiagnoseUpgradePlaintext(data);
+        }
         nc::OfflineFrame early;
-        if (allow_initial_plain_keepalive && early.ParseFromString(data) &&
+        if (!upgrade_completed && allow_initial_plain_keepalive && early.ParseFromString(data) &&
             early.version() == nc::OfflineFrame::V1 && early.has_v1() &&
             early.v1().type() == nc::V1Frame::KEEP_ALIVE && early.v1().has_keep_alive()) {
           allow_initial_plain_keepalive = false; return 0;
         }
         WireFail("Invalid encrypted frame or sequence", 0, Failure::kProtocol); return -1;
       }
+      if (upgrade_verifying) ++upgrade_decrypted;
       allow_initial_plain_keepalive = false; data = *decoded;
     }
     if (!frame.ParseFromString(data) || frame.version() != nc::OfflineFrame::V1 || !frame.has_v1()) { WireFail("Invalid Nearby frame", 0, Failure::kProtocol); return -1; }
+    if (upgrade_verifying && channel_plaintext) ++upgrade_plaintext_records;
     if (frame.v1().type() == nc::V1Frame::PAYLOAD_TRANSFER && !ValidatePayload(frame)) return -1;
     last_received = base::TimeTicks::Now();
     const auto& v = frame.v1();
+    if (upgrade_verifying && upgrade_records <= 16)
+      LOG(INFO) << "crQuickShare: Wi-Fi upgrade verification frame; session=" << diagnostic_session
+                << "; type=" << static_cast<int>(v.type()) << "; decrypted=" << !channel_plaintext
+                << "; negotiated_plaintext=" << channel_plaintext;
     // These are Nearby Connections extensions, not Sharing's paired-key
     // messages carried inside BYTES payloads. Upstream EndpointManager skips
     // frames without a registered processor. This anonymous implementation
@@ -426,7 +575,23 @@ struct QuickShareService::Impl::Session {
     }
     if (v.type() == nc::V1Frame::KEEP_ALIVE) {
       if (!v.has_keep_alive()) { Fail("Missing heartbeat fields"); return -1; }
-      if (!v.keep_alive().ack()) {
+      if (upgrade_verifying) {
+        ++upgrade_heartbeats;
+        const bool matched = v.keep_alive().ack() && v.keep_alive().has_seq_num() &&
+            upgrade_written_pings.contains(v.keep_alive().seq_num());
+        if (matched) {
+          upgraded_ack = true;
+          upgrade_matched_ping = v.keep_alive().seq_num();
+        }
+        if (v.keep_alive().ack() && !matched) ++upgrade_unmatched_acks;
+        if (upgrade_heartbeats <= 16)
+          LOG(INFO) << "crQuickShare: Wi-Fi upgrade verification heartbeat; session=" << diagnostic_session
+                    << "; has_ack=" << v.keep_alive().has_ack() << "; ack=" << v.keep_alive().ack()
+                    << "; has_sequence=" << v.keep_alive().has_seq_num() << "; sequence=" << v.keep_alive().seq_num()
+                    << "; initial_sequence=" << upgraded_ping << "; written_pings=" << upgrade_written_pings.size()
+                    << "; matched=" << matched;
+      }
+      if (!v.keep_alive().ack() && !upgrade_local_last) {
         auto reply = Frame(nc::V1Frame::KEEP_ALIVE);
         reply.mutable_v1()->mutable_keep_alive()->set_ack(true);
         if (v.keep_alive().has_seq_num()) reply.mutable_v1()->mutable_keep_alive()->set_seq_num(v.keep_alive().seq_num());
@@ -459,24 +624,90 @@ struct QuickShareService::Impl::Session {
       }
       if (++upgrade_retry_count > 32) { Fail("Too many bandwidth upgrade retry messages"); return -1; }
       const auto& retry = v.bandwidth_upgrade_retry();
+      if (bootstrap_probe) {
+        if (retry.supported_medium_size() > 32) { Fail("Too many upgrade media"); return -1; }
+        if (!retry.is_request()) upgrade_response_received = true;
+        LOG(INFO) << "crQuickShare: Bootstrap upgrade capabilities; request=" << retry.is_request()
+                  << "; medium_count=" << retry.supported_medium_size();
+        for (auto medium : retry.supported_medium())
+          LOG(INFO) << "crQuickShare: Bootstrap peer medium; medium=" << static_cast<int>(medium);
+      }
       if (retry.is_request()) {
         // This frame exchanges available media; it does not approve a file
         // transfer or require replacing the current encrypted LAN channel.
         auto response = Frame(nc::V1Frame::BANDWIDTH_UPGRADE_RETRY);
         auto* reply = response.mutable_v1()->mutable_bandwidth_upgrade_retry();
         reply->set_is_request(false);
-        reply->add_supported_medium(nc::BandwidthUpgradeRetryFrame::WIFI_LAN);
+        reply->add_supported_medium(std::string_view(channel->name()) == "BLUETOOTH" ?
+            nc::BandwidthUpgradeRetryFrame::BLUETOOTH : nc::BandwidthUpgradeRetryFrame::WIFI_LAN);
+        if (lan_upgrade_enabled && !upgrade_completed) reply->add_supported_medium(nc::BandwidthUpgradeRetryFrame::WIFI_LAN);
+        if (hotspot_connector) reply->add_supported_medium(nc::BandwidthUpgradeRetryFrame::WIFI_HOTSPOT);
         if (!Write(response)) return -1;
       }
       if (upgrade_retry_count == 1)
         LOG(WARNING) << "crQuickShare: Bandwidth upgrade retry handled; request="
-                     << retry.is_request() << "; retaining WIFI_LAN";
+                     << retry.is_request() << "; retaining=" << channel->name();
       return 0;
     }
     if (v.type() == nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION) {
       if (!v.has_bandwidth_upgrade_negotiation()) { Fail("Missing upgrade fields"); return -1; }
+      if (bootstrap_probe) {
+        if (++upgrade_events > 32) { Fail("Too many bootstrap upgrade events"); return -1; }
+        const auto& upgrade = v.bandwidth_upgrade_negotiation();
+        const auto& path = upgrade.upgrade_path_info();
+        if (upgrade.event_type() == nc::BandwidthUpgradeNegotiationFrame::UPGRADE_PATH_AVAILABLE ||
+            upgrade.event_type() == nc::BandwidthUpgradeNegotiationFrame::UPGRADE_FAILURE) {
+          if (!upgrade.has_upgrade_path_info() || !path.has_medium()) {
+            Fail("Missing bootstrap upgrade path medium"); return -1;
+          }
+          upgrade_path_received |= upgrade.event_type() == nc::BandwidthUpgradeNegotiationFrame::UPGRADE_PATH_AVAILABLE;
+          // A late rejection of the LAN request must not reject hotspot fallback.
+          if (upgrade.event_type() == nc::BandwidthUpgradeNegotiationFrame::UPGRADE_FAILURE &&
+              path.medium() == requested_upgrade_medium) upgrade_path_rejected = true;
+        }
+        if (upgrade.event_type() == nc::BandwidthUpgradeNegotiationFrame::LAST_WRITE_TO_PRIOR_CHANNEL) {
+          if (!upgrade_in_progress) { Fail("Unexpected upgrade last-write"); return -1; }
+          LOG(INFO) << "crQuickShare: Wi-Fi upgrade barrier; peer_last_write=1";
+          upgrade_peer_last = true; return 0;
+        }
+        if (upgrade.event_type() == nc::BandwidthUpgradeNegotiationFrame::SAFE_TO_CLOSE_PRIOR_CHANNEL) {
+          if (!upgrade_in_progress || !upgrade_local_last || !upgrade_peer_last) {
+            Fail("Unexpected upgrade safe-to-close"); return -1;
+          }
+          LOG(INFO) << "crQuickShare: Wi-Fi upgrade barrier; peer_safe_to_close=1";
+          upgrade_peer_safe = true; return 0;
+        }
+        LOG(INFO) << "crQuickShare: Bootstrap upgrade event; event=" << static_cast<int>(upgrade.event_type())
+                  << "; has_path=" << upgrade.has_upgrade_path_info()
+                  << "; medium=" << static_cast<int>(path.medium())
+                  << "; hotspot_credentials=" << path.has_wifi_hotspot_credentials()
+                  << "; direct_credentials=" << path.has_wifi_direct_credentials()
+                  << "; lan_socket=" << path.has_wifi_lan_socket()
+                  << "; has_disabling_encryption=" << path.has_supports_disabling_encryption()
+                  << "; disabling_encryption=" << path.supports_disabling_encryption()
+                  << "; has_introduction_ack=" << path.has_supports_client_introduction_ack()
+                  << "; introduction_ack=" << path.supports_client_introduction_ack()
+                  << "; network_switch=0";
+      }
       if (v.bandwidth_upgrade_negotiation().event_type() == nc::BandwidthUpgradeNegotiationFrame::UPGRADE_PATH_AVAILABLE) {
+        const auto& path = v.bandwidth_upgrade_negotiation().upgrade_path_info();
+        if (bootstrap_probe && (outgoing || !accepted) &&
+            !upgrade_in_progress && !upgrade_completed && !upgrade_path &&
+            ((hotspot_connector && path.medium() == nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo::WIFI_HOTSPOT &&
+              path.has_wifi_hotspot_credentials() && !path.has_wifi_lan_socket()) ||
+             (lan_upgrade_enabled && !lan_upgrade_attempted &&
+              path.medium() == nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo::WIFI_LAN &&
+              path.has_wifi_lan_socket() && !path.has_wifi_hotspot_credentials())) &&
+            !path.has_wifi_direct_credentials() &&
+            !path.has_bluetooth_credentials() && !path.has_wifi_aware_credentials() && !path.has_web_rtc_credentials() &&
+            !path.has_awdl_credentials() && !path.has_upgrade_path_request()) {
+          upgrade_path = path;
+          return 0;
+        }
         auto response = Frame(nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION);
+        if (bluetooth_direct)
+          LOG(INFO) << "crQuickShare: Bluetooth direct transfer retaining channel; session="
+                    << diagnostic_session << "; reason=peer_upgrade_path";
         auto* b = response.mutable_v1()->mutable_bandwidth_upgrade_negotiation();
         b->set_event_type(nc::BandwidthUpgradeNegotiationFrame::UPGRADE_FAILURE);
         *b->mutable_upgrade_path_info() = v.bandwidth_upgrade_negotiation().upgrade_path_info();
@@ -520,10 +751,20 @@ struct QuickShareService::Impl::Session {
     if (outgoing) {
       auto f = Frame(nc::V1Frame::CONNECTION_REQUEST);
       auto* r = f.mutable_v1()->mutable_connection_request();
-      { std::lock_guard guard(owner.mutex); r->set_endpoint_id(owner.endpoint); }
+      r->set_endpoint_id(local_endpoint);
       r->set_endpoint_name(owner.endpoint_info);
       r->set_endpoint_info(owner.endpoint_info); r->set_nonce(base::RandUint64() & INT32_MAX);
-      r->add_mediums(nc::ConnectionRequestFrame::WIFI_LAN);
+      r->add_mediums(std::string_view(channel->name()) == "BLUETOOTH" ?
+          nc::ConnectionRequestFrame::BLUETOOTH : nc::ConnectionRequestFrame::WIFI_LAN);
+      if (lan_upgrade_enabled) r->add_mediums(nc::ConnectionRequestFrame::WIFI_LAN);
+      if (hotspot_connector) {
+        r->add_mediums(nc::ConnectionRequestFrame::WIFI_HOTSPOT);
+        auto* roles = r->mutable_medium_metadata()->mutable_medium_role();
+        roles->set_support_wifi_hotspot_client(true);
+        roles->set_support_wifi_hotspot_host(false);
+        roles->set_support_wifi_direct_group_client(false);
+        roles->set_support_wifi_direct_group_owner(false);
+      }
       r->set_keep_alive_interval_millis(5000); r->set_keep_alive_timeout_millis(30000);
       if (!Write(f)) return false;
     } else {
@@ -551,7 +792,14 @@ struct QuickShareService::Impl::Session {
     if (!handshake) return Fail("Unable to initialize UKEY2");
     auto send_next = [&] { auto bytes = handshake->GetNextHandshakeMessage(); return bytes && WriteRaw(*bytes); };
     auto receive_next = [&] { std::string bytes; return AwaitRaw(bytes) && handshake->ParseHandshakeMessage(bytes).success; };
-    if (outgoing ? !(send_next() && receive_next() && send_next()) : !(receive_next() && send_next() && receive_next())) return Fail("UKEY2 handshake failed");
+    if (outgoing ? !(send_next() && receive_next() && send_next()) : !(receive_next() && send_next() && receive_next())) {
+      const auto setup_error = channel->connection_error();
+      if (!setup_error.empty()) {
+        Stage("bluetooth_connect");
+        return Fail(setup_error, Failure::kConnection);
+      }
+      return Fail("UKEY2 handshake failed");
+    }
     auto token = handshake->GetVerificationString(32);
     if (!token) return Fail("Missing verification token");
     owner.Update([&](Snapshot& s) { s.code = Code(*token); });
@@ -875,6 +1123,357 @@ struct QuickShareService::Impl::Session {
     if (!Active()) return false;
     timed_out = true; return Fail("Sharing response timed out");
   }
+  bool RequestWifiUpgrade(const std::function<uint64_t()>& socket_sent_bytes) {
+    using Path = nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo;
+    // Request LAN alone first: list ordering is not a peer preference contract.
+    // Retry only before either side has committed to draining Bluetooth.
+    for (int attempt = 0; attempt < 2 && Active(); ++attempt) {
+      const bool request_lan = lan_upgrade_enabled && !lan_upgrade_attempted;
+      Stage("upgrade_path_probe");
+      if (!upgrade_path) {
+        upgrade_path_received = upgrade_path_rejected = false;
+        auto upgrade_request = Frame(nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION);
+        auto* negotiation = upgrade_request.mutable_v1()->mutable_bandwidth_upgrade_negotiation();
+        negotiation->set_event_type(nc::BandwidthUpgradeNegotiationFrame::UPGRADE_PATH_REQUEST);
+        auto* path = negotiation->mutable_upgrade_path_info()->mutable_upgrade_path_request();
+        requested_upgrade_medium = request_lan ? Path::WIFI_LAN : hotspot_connector ? Path::WIFI_HOTSPOT : Path::BLUETOOTH;
+        path->add_mediums(requested_upgrade_medium);
+        auto* roles = path->mutable_medium_meta_data()->mutable_medium_role();
+        roles->set_support_wifi_direct_group_owner(false);
+        roles->set_support_wifi_direct_group_client(false);
+        roles->set_support_wifi_hotspot_host(false);
+        roles->set_support_wifi_hotspot_client(bool(hotspot_connector));
+        LOG(INFO) << "crQuickShare: Bootstrap path request; session=" << diagnostic_session
+                  << "; medium=" << (request_lan ? "WIFI_LAN" : hotspot_connector ? "WIFI_HOTSPOT" : "BLUETOOTH");
+        if (!Write(upgrade_request)) return false;
+        uint64_t request_end = transport_written_bytes;
+        for (const auto& pending : writes) request_end += pending.bytes.size() - pending.offset;
+        const auto deadline = base::TimeTicks::Now() + base::Seconds(request_lan ? 5 : hotspot_connector ? 15 : 8);
+        while (Active() && !upgrade_path && !upgrade_path_rejected && base::TimeTicks::Now() < deadline) {
+          nc::OfflineFrame frame;
+          const int r = Read(frame);
+          if (r < 0 || (r > 0 && !Control(frame))) return false;
+        }
+        LOG(INFO) << "crQuickShare: Bootstrap path wait; session=" << diagnostic_session
+                  << "; socket_written=" << (socket_sent_bytes() >= request_end)
+                  << "; peer_receipt_confirmed=0"
+                  << "; path_received=" << bool(upgrade_path) << "; path_rejected=" << upgrade_path_rejected
+                  << "; wait_expired=" << (base::TimeTicks::Now() >= deadline);
+      }
+      if (!Active()) return false;
+      const bool lan_path = upgrade_path ? upgrade_path->medium() == Path::WIFI_LAN : request_lan;
+      if (upgrade_path && UpgradeWifi(socket_sent_bytes)) return true;
+      if (!Active() || upgrade_completed || upgrade_local_last || upgrade_peer_last) return false;
+      if (!lan_path || !hotspot_connector) break;
+      lan_upgrade_attempted = true;
+      LOG(INFO) << "crQuickShare: Wi-Fi upgrade fallback; session=" << diagnostic_session
+                << "; from=WIFI_LAN; to=WIFI_HOTSPOT";
+    }
+    if (!hotspot_connector && !lan_upgrade_enabled) return false;
+    return Fail("No usable Wi-Fi upgrade path", Failure::kConnection);
+  }
+  bool UpgradeWifi(const std::function<uint64_t()>& socket_sent_bytes) {
+    if (!upgrade_path) return false;
+    const auto path = std::move(*upgrade_path); upgrade_path.reset();
+    requested_upgrade_medium = path.medium();
+    upgrade_path_rejected = false;
+    upgrade_in_progress = true;
+    const bool lan = path.medium() == nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo::WIFI_LAN;
+    Stage(lan ? "lan_upgrade_connect" : "hotspot_join");
+    const auto deadline = base::TimeTicks::Now() + base::Seconds(lan ? 10 : 40);
+    auto service_old = [&]() {
+      if (!Active() || upgrade_path_rejected || base::TimeTicks::Now() >= deadline) return false;
+      nc::OfflineFrame frame;
+      const int result = Read(frame, 0);
+      return result >= 0 && (!result || Control(frame)) && !upgrade_path_rejected && Active();
+    };
+    const auto& c = path.wifi_hotspot_credentials();
+    HotspotCredentials credentials{c.ssid(), c.password(), c.gateway(), c.port(), c.frequency()};
+    HotspotUpgradeResult result;
+    if (lan) {
+      const auto& socket = path.wifi_lan_socket();
+      auto connected = ConnectLanUpgradeChannel(socket.ip_address(), socket.wifi_port(),
+          std::min(deadline, base::TimeTicks::Now() + base::Seconds(3)), service_old);
+      result.channel = std::move(connected.channel);
+      result.error = connected.outcome;
+      LOG(INFO) << "crQuickShare: LAN upgrade connect; session=" << diagnostic_session
+                << "; outcome=" << connected.outcome << "; errno=" << connected.system_error;
+    } else if (hotspot_connector) {
+      result = hotspot_connector(credentials, deadline, service_old);
+    }
+    auto reject = [&](const char* reason) {
+      if (result.channel) result.channel->Close();
+      LOG(WARNING) << "crQuickShare: Wi-Fi upgrade failed; reason=" << reason
+                   << "; local_last=" << upgrade_local_last << "; peer_last=" << upgrade_peer_last;
+      // Once either end has committed to draining the old channel, resuming
+      // application writes on Bluetooth would violate the shared cipher order.
+      if (upgrade_local_last || upgrade_peer_last) {
+        WireFail("Wi-Fi upgrade failed after channel drain began");
+        channel->Close();
+      } else if (Active()) {
+        auto failure_frame = Frame(nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION);
+        auto* body = failure_frame.mutable_v1()->mutable_bandwidth_upgrade_negotiation();
+        body->set_event_type(nc::BandwidthUpgradeNegotiationFrame::UPGRADE_FAILURE);
+        *body->mutable_upgrade_path_info() = path;
+        Write(failure_frame);
+      }
+      upgrade_in_progress = false;
+      // Restoring a network is deliberately deferred until protocol cleanup.
+      upgrade_network = std::move(result.network);
+      return false;
+    };
+    if (!result.channel) return reject(result.error ? result.error : "wifi_connect_failed");
+    upgrade_tcp_ready = base::TimeTicks::Now();
+    upgrade_tcp_received = false;
+    upgrade_wait_calls = upgrade_readable_events = upgrade_read_would_block = 0;
+    LOG(INFO) << "crQuickShare: Wi-Fi upgrade TCP ready; session=" << diagnostic_session
+              << "; outgoing=" << outgoing << "; accepted=" << accepted
+              << "; medium=" << result.channel->name()
+              << "; old_buffered_bytes=" << buffer.size() << "; old_pending_bytes=" << queued_bytes;
+    Stage("upgrade_client_introduction");
+    // The first records on the replacement socket are plaintext Nearby frames;
+    // the existing UKEY2 context is retained and used only after both barriers.
+    auto log_upgrade_io = [&](const char* operation, int status, int system_error, size_t bytes) {
+      LOG(INFO) << "crQuickShare: Wi-Fi upgrade introduction IO; session=" << diagnostic_session
+                << "; operation=" << operation << "; status=" << status << "; errno=" << system_error
+                << "; bytes=" << bytes
+                << "; tcp_age_ms=" << (base::TimeTicks::Now() - upgrade_tcp_ready).InMilliseconds();
+    };
+    auto write_plain = [&](const nc::OfflineFrame& frame) {
+      const auto body = frame.SerializeAsString();
+      std::string bytes(4, '\0');
+      for (int i = 0; i < 4; ++i) bytes[i] = char(body.size() >> (24 - 8 * i));
+      bytes += body;
+      size_t offset = 0;
+      while (offset < bytes.size() && service_old()) {
+        const auto io = result.channel->Write(base::span<const char>(std::string_view(bytes).substr(offset)));
+        if (io.status == TransportChannel::Status::kOk && io.bytes) offset += io.bytes;
+        else if (io.status != TransportChannel::Status::kWouldBlock) {
+          log_upgrade_io("write_failed", static_cast<int>(io.status), io.system_error, offset); return false;
+        } else if (const auto ready = result.channel->Wait(false, true, 50); ready.system_error) {
+          log_upgrade_io("write_wait_failed", -1, ready.system_error, offset); return false;
+        }
+      }
+      log_upgrade_io("write_finished", offset == bytes.size() ? 0 : -1, 0, offset);
+      return offset == bytes.size();
+    };
+    auto read_exact = [&](std::string& bytes, size_t size) {
+      bytes.clear();
+      while (bytes.size() < size && service_old()) {
+        std::array<char, 4096> data;
+        const auto io = result.channel->Read(base::span(data).first(std::min(data.size(), size - bytes.size())));
+        if (io.status == TransportChannel::Status::kOk && io.bytes) {
+          if (!upgrade_tcp_received) {
+            upgrade_tcp_received = true;
+            log_upgrade_io("first_receive", static_cast<int>(io.status), 0, io.bytes);
+          }
+          bytes.append(data.data(), io.bytes);
+        } else if (io.status != TransportChannel::Status::kWouldBlock) {
+          log_upgrade_io("read_failed", static_cast<int>(io.status), io.system_error, bytes.size()); return false;
+        } else if (const auto ready = result.channel->Wait(true, false, 50); ready.system_error) {
+          log_upgrade_io("read_wait_failed", -1, ready.system_error, bytes.size()); return false;
+        }
+      }
+      log_upgrade_io("read_finished", bytes.size() == size ? 0 : -1, 0, bytes.size());
+      return bytes.size() == size;
+    };
+    auto intro = Frame(nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION);
+    auto* introduction = intro.mutable_v1()->mutable_bandwidth_upgrade_negotiation();
+    introduction->set_event_type(nc::BandwidthUpgradeNegotiationFrame::CLIENT_INTRODUCTION);
+    introduction->mutable_client_introduction()->set_endpoint_id(local_endpoint);
+    const bool negotiated_plaintext = !lan && path.supports_disabling_encryption();
+    introduction->mutable_client_introduction()->set_supports_disabling_encryption(negotiated_plaintext);
+    LOG(INFO) << "crQuickShare: Wi-Fi upgrade encryption selection; session=" << diagnostic_session
+              << "; peer_has_disabling_encryption=" << path.has_supports_disabling_encryption()
+              << "; peer_disabling_encryption=" << path.supports_disabling_encryption()
+              << "; local_disabling_encryption=" << negotiated_plaintext
+              << "; encryption_retained=" << !negotiated_plaintext
+              << "; introduction_ack_expected=" << path.supports_client_introduction_ack();
+    if (!write_plain(intro)) return reject("client_introduction_write_failed");
+    if (path.supports_client_introduction_ack()) {
+      std::string bytes;
+      if (!read_exact(bytes, 4)) return reject("client_introduction_ack_header_failed");
+      uint32_t size = 0;
+      for (unsigned char byte : bytes) size = (size << 8) | byte;
+      if (!size || size > 4096 || !read_exact(bytes, size)) return reject("client_introduction_ack_length");
+      nc::OfflineFrame ack;
+      if (!ack.ParseFromString(bytes) || ack.version() != nc::OfflineFrame::V1 || !ack.has_v1() ||
+          ack.v1().type() != nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION ||
+          !ack.v1().has_bandwidth_upgrade_negotiation() ||
+          ack.v1().bandwidth_upgrade_negotiation().event_type() != nc::BandwidthUpgradeNegotiationFrame::CLIENT_INTRODUCTION_ACK ||
+          ack.v1().bandwidth_upgrade_negotiation().has_upgrade_path_info() ||
+          ack.v1().bandwidth_upgrade_negotiation().has_client_introduction())
+        return reject("client_introduction_ack_invalid");
+    }
+    Stage("upgrade_drain_bluetooth");
+    auto event = [&](nc::BandwidthUpgradeNegotiationFrame::EventType type) {
+      auto frame = Frame(nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION);
+      frame.mutable_v1()->mutable_bandwidth_upgrade_negotiation()->set_event_type(type);
+      return Write(frame);
+    };
+    upgrade_local_last = true;  // Suppress heartbeat writes after this barrier.
+    if (!event(nc::BandwidthUpgradeNegotiationFrame::LAST_WRITE_TO_PRIOR_CHANNEL)) return reject("last_write_failed");
+    while (!upgrade_peer_last && service_old()) channel->Wait(true, !writes.empty(), 50);
+    if (!upgrade_peer_last || !Active()) return reject("peer_last_write_missing");
+    if (!event(nc::BandwidthUpgradeNegotiationFrame::SAFE_TO_CLOSE_PRIOR_CHANNEL)) return reject("safe_to_close_failed");
+    uint64_t barrier_end = transport_written_bytes;
+    for (const auto& pending : writes) barrier_end += pending.bytes.size() - pending.offset;
+    while (Active() && base::TimeTicks::Now() < deadline) {
+      // After SAFE_TO_CLOSE the peer may send the optional plaintext disconnect.
+      // Do not feed it to the shared cipher's encrypted-record reader.
+      if (upgrade_peer_safe) { if (!PumpOutput()) break; }
+      else if (!service_old()) break;
+      if (upgrade_peer_safe && writes.empty() && socket_sent_bytes() >= barrier_end) break;
+      channel->Wait(!upgrade_peer_safe, !writes.empty(), 50);
+    }
+    if (!Active() || !upgrade_peer_safe || !writes.empty() || socket_sent_bytes() < barrier_end)
+      return reject("old_channel_drain_incomplete");
+    Stage("upgrade_close_bluetooth");
+    // Match BwuManager::ProcessSafeToClosePriorChannelEvent: the optional
+    // disconnect is plaintext, so it cannot advance the shared UKEY2 sequence.
+    // The peer may wait for this record or EOF before resuming its new channel.
+    auto disconnect_frame = Frame(nc::V1Frame::DISCONNECTION);
+    auto* disconnect_body = disconnect_frame.mutable_v1()->mutable_disconnection();
+    disconnect_body->set_request_safe_to_disconnect(false);
+    disconnect_body->set_ack_safe_to_disconnect(false);
+    const auto disconnect_body_bytes = disconnect_frame.SerializeAsString();
+    std::string disconnect_record(4, '\0');
+    for (int i = 0; i < 4; ++i) disconnect_record[i] = char(disconnect_body_bytes.size() >> (24 - 8 * i));
+    disconnect_record += disconnect_body_bytes;
+    const auto close_deadline = base::TimeTicks::Now() + base::Seconds(2);
+    size_t disconnect_offset = 0;
+    bool old_closed = false, close_io_error = false, disconnect_received = false;
+    while (Active() && base::TimeTicks::Now() < close_deadline) {
+      if (disconnect_offset < disconnect_record.size()) {
+        const auto io = channel->Write(base::span<const char>(std::string_view(disconnect_record).substr(disconnect_offset)));
+        if (io.status == TransportChannel::Status::kOk && io.bytes) {
+          disconnect_offset += io.bytes; transport_written_bytes += io.bytes;
+        } else if (io.status == TransportChannel::Status::kClosed) { old_closed = true; break; }
+        else if (io.status != TransportChannel::Status::kWouldBlock) { close_io_error = true; break; }
+      }
+      if (buffer.size() >= 4) {
+        uint32_t length = 0;
+        for (int i = 0; i < 4; ++i) length = (length << 8) | uint8_t(buffer[i]);
+        if (!length || length > 4096) { close_io_error = true; break; }
+        if (buffer.size() >= length + 4) {
+          nc::OfflineFrame goodbye;
+          disconnect_received = goodbye.ParseFromString(buffer.substr(4, length)) &&
+              goodbye.version() == nc::OfflineFrame::V1 && goodbye.has_v1() &&
+              goodbye.v1().type() == nc::V1Frame::DISCONNECTION && goodbye.v1().has_disconnection();
+          if (!disconnect_received) { close_io_error = true; break; }
+        }
+      }
+      if (disconnect_received && disconnect_offset == disconnect_record.size() &&
+          socket_sent_bytes() >= transport_written_bytes) break;
+      const auto ready = channel->Wait(!disconnect_received, disconnect_offset < disconnect_record.size(), 50);
+      if (ready.system_error) { close_io_error = true; break; }
+      if (ready.readable) {
+        std::array<char, 4096> tail;
+        const auto io = channel->Read(base::span(tail));
+        if (io.status == TransportChannel::Status::kClosed) { old_closed = true; break; }
+        if (io.status == TransportChannel::Status::kOk && io.bytes) buffer.append(tail.data(), io.bytes);
+        else if (io.status != TransportChannel::Status::kWouldBlock) { close_io_error = true; break; }
+      }
+    }
+    LOG(INFO) << "crQuickShare: Wi-Fi upgrade prior channel shutdown; session=" << diagnostic_session
+              << "; plaintext_disconnect_written=" << (disconnect_offset == disconnect_record.size() && socket_sent_bytes() >= transport_written_bytes)
+              << "; plaintext_disconnect_received=" << disconnect_received << "; peer_closed=" << old_closed
+              << "; io_error=" << close_io_error << "; wait_expired=" << (base::TimeTicks::Now() >= close_deadline);
+    buffer.clear();
+    channel->Close();
+    if (!Active()) return reject("cancelled_during_old_channel_close");
+    channel = std::move(result.channel);
+    bluetooth_direct = false;
+    channel_plaintext = negotiated_plaintext;
+    upgrade_network = std::move(result.network);
+    upgrade_in_progress = false; upgrade_completed = true; upgrade_local_last = false;
+    last_received = last_keepalive = base::TimeTicks::Now();
+    Stage(lan ? "lan_channel_ready" : "hotspot_channel_ready");
+    LOG(INFO) << "crQuickShare: Wi-Fi upgrade channel upgraded; encryption_retained=" << !channel_plaintext
+              << "; negotiated_plaintext=" << channel_plaintext << "; medium=" << channel->name();
+    // Verify the negotiated channel with a matching heartbeat ACK. Plaintext
+    // success is never reported as an encrypted round trip. No attachments.
+    auto ping = Frame(nc::V1Frame::KEEP_ALIVE);
+    upgrade_written_pings.clear(); upgrade_matched_ping.reset();
+    upgrade_last_ping_written = base::TimeTicks();
+    upgraded_ack = false; upgrade_ping_written = false; upgrade_verifying = true;
+    upgraded_ping = ++keepalive_sequence;
+    ping.mutable_v1()->mutable_keep_alive()->set_seq_num(upgraded_ping);
+    ping.mutable_v1()->mutable_keep_alive()->set_ack(false);
+    if (!Write(ping)) {
+      upgrade_verifying = false;
+      LOG(INFO) << "crQuickShare: Wi-Fi upgrade channel verification; session=" << diagnostic_session
+                << "; acknowledged=0; outcome=ping_queue_failed";
+      return false;
+    }
+    const uint64_t written_before_verification = transport_written_bytes;
+    LOG(INFO) << "crQuickShare: Wi-Fi upgrade verification ping queued; session=" << diagnostic_session
+              << "; sequence=" << upgraded_ping << "; pending_bytes=" << queued_bytes << "; timeout_ms=15000";
+    const auto verify_started = base::TimeTicks::Now();
+    const auto verify_deadline = verify_started + base::Seconds(15);
+    constexpr std::array<int, 3> retry_intervals_ms{500, 1000, 2000};
+    size_t retries = 0;
+    while (Active() && !upgraded_ack && base::TimeTicks::Now() < verify_deadline) {
+      nc::OfflineFrame frame; const int r = Read(frame);
+      if (r < 0 || (r > 0 && !Control(frame))) break;
+      const auto now = base::TimeTicks::Now();
+      // Process incoming ACKs before retrying. Do not queue another ping until
+      // the previous one was fully written, and measure backoff from that
+      // write rather than queue time. Normal heartbeat scheduling is suspended
+      // only during this bounded verification window; peer requests still get ACKs.
+      if (!Active() || upgraded_ack || now >= verify_deadline) break;
+      if (retries < retry_intervals_ms.size() &&
+          upgrade_written_pings.size() == retries + 1 &&
+          !upgrade_last_ping_written.is_null() &&
+          now - upgrade_last_ping_written >= base::Milliseconds(retry_intervals_ms[retries])) {
+        auto retry = Frame(nc::V1Frame::KEEP_ALIVE);
+        const uint32_t sequence = ++keepalive_sequence;
+        retry.mutable_v1()->mutable_keep_alive()->set_seq_num(sequence);
+        retry.mutable_v1()->mutable_keep_alive()->set_ack(false);
+        if (!Write(retry)) break;
+        ++retries;
+        LOG(INFO) << "crQuickShare: Wi-Fi upgrade verification retry queued; session=" << diagnostic_session
+                  << "; sequence=" << sequence << "; retry=" << retries
+                  << "; interval_ms=" << retry_intervals_ms[retries - 1]
+                  << "; elapsed_ms=" << (now - verify_started).InMilliseconds();
+      }
+    }
+    upgrade_verifying = false;
+    upgrade_last_ping_written = base::TimeTicks();
+    // Resume the negotiated heartbeat cadence without an immediate extra ping.
+    last_keepalive = base::TimeTicks::Now();
+    const char* verification_outcome = upgraded_ack ? "matched_ack" :
+        upgrade_decode_failures ? "decrypt_failed" : remote_closed ? "remote_closed" : failed ? "session_failed" :
+        !Active() ? "session_inactive" : !upgrade_ping_written ? "ping_not_fully_written" :
+        !upgrade_received_bytes ? "no_data_in_window" : !upgrade_records ? "incomplete_record" :
+        upgrade_unmatched_acks ? "ack_not_matched" : "no_matching_ack";
+    LOG(INFO) << "crQuickShare: Wi-Fi upgrade channel verification; session=" << diagnostic_session
+              << "; acknowledged=" << upgraded_ack << "; outcome=" << verification_outcome
+              << "; outgoing=" << outgoing << "; accepted=" << accepted
+              << "; wait_calls=" << upgrade_wait_calls << "; readable_events=" << upgrade_readable_events
+              << "; read_would_block=" << upgrade_read_would_block
+              << "; retries=" << retries
+              << "; elapsed_ms=" << (base::TimeTicks::Now() - verify_started).InMilliseconds()
+              << "; written_pings=" << upgrade_written_pings.size()
+              << "; matched_sequence=" << (upgrade_matched_ping ? std::to_string(*upgrade_matched_ping) : "none")
+              << "; negotiated_plaintext=" << channel_plaintext
+              << "; channel_round_trip=" << (upgraded_ack && Active())
+              << "; encrypted_round_trip=" << (upgraded_ack && Active() && !channel_plaintext)
+              << "; ping_written=" << upgrade_ping_written
+              << "; written_bytes=" << transport_written_bytes - written_before_verification
+              << "; received_bytes=" << upgrade_received_bytes << "; records=" << upgrade_records
+              << "; decrypted_records=" << upgrade_decrypted << "; decode_failures=" << upgrade_decode_failures
+              << "; plaintext_records=" << upgrade_plaintext_records
+              << "; heartbeats=" << upgrade_heartbeats << "; unmatched_acks=" << upgrade_unmatched_acks
+              << "; buffered_bytes=" << buffer.size() << "; pending_bytes=" << queued_bytes
+              << "; remote_closed=" << remote_closed << "; session_failed=" << failed
+              << "; wait_expired=" << (base::TimeTicks::Now() >= verify_deadline);
+    if (!upgraded_ack && Active() && base::TimeTicks::Now() >= verify_deadline) {
+      timed_out = true;
+      return Fail("Wi-Fi upgrade verification timed out", Failure::kConnection);
+    }
+    return upgraded_ack && Active();
+  }
   bool Pair() {
     Stage("anonymous_pairing");
     auto f = Sharing(qs::V1Frame::PAIRED_KEY_ENCRYPTION);
@@ -920,6 +1519,9 @@ struct QuickShareService::Impl::Session {
     auto f = Sharing(qs::V1Frame::RESPONSE);
     f.mutable_v1()->mutable_connection_response()->set_status(status);
     if (!SendSharing(f)) return false;
+    LOG(INFO) << "crQuickShare: Sharing response queued; session=" << diagnostic_session
+              << "; status=" << static_cast<int>(status) << "; medium=" << channel->name()
+              << "; upgrade_completed=" << upgrade_completed << "; pending_bytes=" << queued_bytes;
     if (status != qs::ConnectionResponseFrame::ACCEPT) terminal_sent = true;
     return true;
   }
@@ -971,17 +1573,44 @@ struct QuickShareService::Impl::Session {
             info.last_modified == file.last_modified) || Fail("Source file changed after inspection", Failure::kSourceFile);
   }
   bool SendFiles(std::vector<File>& files, const qs::Frame& intro, int64_t total) {
+    // Select before the handshake so advertised media and upgrade replies
+    // agree with the transfer policy. This limit applies to the whole batch.
+    constexpr int64_t kBluetoothDirectLimit = 72 * 1024;
+    bluetooth_direct = bootstrap_sent_bytes && total <= kBluetoothDirectLimit;
+    if (bluetooth_direct) { hotspot_connector = {}; lan_upgrade_enabled = false; }
+    else if (bootstrap_sent_bytes && !hotspot_connector && !lan_upgrade_enabled)
+      return Fail("This batch requires an available Wi-Fi hotspot connection", Failure::kHotspotUnavailable);
+    LOG(INFO) << "crQuickShare: Transfer medium selected; session=" << diagnostic_session
+              << "; medium=" << (bluetooth_direct ? "BLUETOOTH" :
+                  bootstrap_sent_bytes ? (lan_upgrade_enabled ? "WIFI_LAN_UPGRADE" : "WIFI_HOTSPOT") : "WIFI_LAN")
+              << "; total_bytes=" << total << "; bluetooth_limit_bytes=" << kBluetoothDirectLimit;
     if (!Handshake(true) || !Pair()) return false;
+    // Offer on the existing authenticated channel so the receiver can show
+    // its confirmation before the hotspot association and DHCP delay.
     expected_sharing = qs::V1Frame::RESPONSE; offer_sent = true;
     response_deadline = base::TimeTicks::Now() + base::Seconds(60);
-    if (!SendSharing(intro) || !Confirm()) return false;
+    Stage("file_introduction");
+    if (!SendSharing(intro)) return false;
+    LOG(INFO) << "crQuickShare: File introduction queued; session=" << diagnostic_session
+              << "; upgrade_pending=" << (bootstrap_sent_bytes && !bluetooth_direct);
+    if (!Confirm()) return false;
     owner.PhaseChanged(Phase::kWaiting);
     qs::Frame response;
     if (!AwaitSharing(response, qs::V1Frame::RESPONSE)) return false;
     if (!response.v1().has_connection_response() || response.v1().connection_response().status() != qs::ConnectionResponseFrame::ACCEPT) { rejected = true; return false; }
     RetireSentControls();
     accepted = true; expected_sharing = qs::V1Frame::UNKNOWN_FRAME_TYPE;
+    // Do not change networks for a rejected offer. No file bytes are sent
+    // until confirmation and, when selected, replacement-channel verification.
+    if (bootstrap_sent_bytes && !bluetooth_direct) {
+      owner.PhaseChanged(Phase::kConnecting);
+      if (!RequestWifiUpgrade(bootstrap_sent_bytes)) {
+        if (Active()) Fail("Wi-Fi channel verification failed", Failure::kConnection);
+        return false;
+      }
+    }
     LOG(WARNING) << "crQuickShare: Sending files; count=" << files.size()
+                 << "; medium=" << channel->name()
                  << "; total_bytes=" << total << "; peer_disconnect_version=" << peer_disconnect_version
                  << "; start_transfer=1; indexed_chunks=1";
     Stage("file_transfer");
@@ -1030,6 +1659,15 @@ struct QuickShareService::Impl::Session {
                  << "; peer_disconnect_version=" << peer_disconnect_version
                  << "; receive_idle_ms=" << (base::TimeTicks::Now() - last_received).InMilliseconds();
     timed_out = true; return Fail("Peer did not finish the transfer");
+  }
+  void CleanupNetwork() {
+    if (!upgrade_network) return;
+    Stage("network_cleanup");
+    owner.PhaseChanged(Phase::kRestoringNetwork);
+    const auto deadline = base::TimeTicks::Now() + base::Seconds(owner.stop ? 2 : 12);
+    const bool cleaned = upgrade_network->Cleanup(deadline, [&] { return !owner.stop; });
+    owner.Update([&](Snapshot& s) { s.network_cleanup_failed = !cleaned; });
+    upgrade_network.reset();
   }
   bool SenderFinishedAfterClose() {
     if (!remote_closed || failed || owner.cancel || owner.stop || peer_cancelled || rejected || timed_out) return false;
@@ -1086,6 +1724,7 @@ struct QuickShareService::Impl::Session {
       s.total = total; s.text_count = order.size(); s.text_is_url = urls_only;
     });
     if (!Confirm()) return false;
+    if (!PrepareIncomingMedium(total)) return false;
     accepted = true;
     if (!Response(qs::ConnectionResponseFrame::ACCEPT) || !Flush()) return false;
     Stage("text_transfer"); owner.PhaseChanged(Phase::kTransferring);
@@ -1118,11 +1757,47 @@ struct QuickShareService::Impl::Session {
               << "; total_bytes=" << total;
     return true;
   }
+  bool PrepareIncomingMedium(int64_t total) {
+    if (!bluetooth_direct || upgrade_completed) return true;
+    const bool required = total > 72 * 1024;
+    LOG(INFO) << "crQuickShare: Incoming medium selection; session=" << diagnostic_session
+              << "; total_bytes=" << total << "; wifi_upgrade_required=" << required
+              << "; hotspot_client=" << bool(hotspot_connector)
+              << "; lan_client=" << lan_upgrade_enabled
+              << "; path_available=" << bool(upgrade_path);
+    // Keep small transfers on Bluetooth unless the sender already offered a
+    // supported path. Never release ACCEPT until the replacement is verified:
+    // the sender can start streaming immediately after receiving it.
+    if (!required && !upgrade_path) return true;
+    if (!hotspot_connector && !lan_upgrade_enabled)
+      return Fail("Large Bluetooth reception requires a Wi-Fi upgrade", Failure::kConnection);
+    if (!RequestWifiUpgrade(bootstrap_sent_bytes)) {
+      if (!failed && Active())
+        Fail("Incoming Wi-Fi upgrade failed", Failure::kConnection);
+      return false;
+    }
+    return true;
+  }
   bool ReceiveFiles() {
     if (!Handshake(false) || !Pair()) return false;
     qs::Frame intro;
     if (!AwaitSharing(intro, qs::V1Frame::INTRODUCTION) || !intro.v1().has_introduction()) return false;
     const auto& offer = intro.v1().introduction();
+    if (bluetooth_direct && !hotspot_connector && !lan_upgrade_enabled) {
+      int64_t bluetooth_total = 0;
+      const auto add_size = [&](int64_t size) {
+        if (size < 0 || size > 72 * 1024 - bluetooth_total) return false;
+        bluetooth_total += size;
+        return true;
+      };
+      bool fits = true;
+      for (const auto& metadata : offer.file_metadata()) fits = add_size(metadata.size()) && fits;
+      for (const auto& metadata : offer.text_metadata()) fits = add_size(metadata.size()) && fits;
+      if (!fits) {
+        Response(qs::ConnectionResponseFrame::UNSUPPORTED_ATTACHMENT_TYPE);
+        return Fail("Bluetooth reception currently supports batches up to 72 KiB", Failure::kUnsupported);
+      }
+    }
     if (offer.text_metadata_size()) return ReceiveTexts(offer);
     if (offer.file_metadata_size() < 1 || offer.file_metadata_size() > int(kMaxFiles) || offer.text_metadata_size() || offer.wifi_credentials_metadata_size() || offer.app_metadata_size() || offer.stream_metadata_size()) { Response(qs::ConnectionResponseFrame::UNSUPPORTED_ATTACHMENT_TYPE); return Fail("Only file attachments are supported", Failure::kUnsupported); }
     std::map<int64_t, File> files; std::set<std::string> names, folders; int64_t total = 0;
@@ -1170,6 +1845,7 @@ struct QuickShareService::Impl::Session {
       if (storage_error.no_space) Response(qs::ConnectionResponseFrame::NOT_ENOUGH_SPACE);
       return Fail(storage_error.message, storage_error.failure);
     }
+    if (!PrepareIncomingMedium(total)) return false;
     accepted = true;
     if (!Response(qs::ConnectionResponseFrame::ACCEPT) || !Flush()) return false;
     Stage("file_transfer");
@@ -1219,6 +1895,9 @@ struct QuickShareService::Impl::Session {
   }
   void Finish(bool success) {
     if (!crypto || wire_broken || owner.stop) return;
+    // A failed migration cannot send CANCEL/disconnect after promising that
+    // the prior channel is drained. The caller closes both channels instead.
+    if (!upgrade_completed && (upgrade_local_last || upgrade_peer_last)) return;
     finishing = true;
     // Cleanup has its own bounded IO budget; do not clear the user's cancel
     // flag, and never append ciphertext after a truncated/invalid record.
@@ -1267,11 +1946,46 @@ struct QuickShareService::Impl::Session {
   }
 
 };
+bool QuickShareService::ProbeBootstrap(std::unique_ptr<TransportChannel> channel,
+                                     std::function<uint64_t()> socket_sent_bytes,
+                                     HotspotConnector hotspot, std::function<bool()> cancelled) {
+  if (!channel || !socket_sent_bytes) return false;
+  Impl owner("crFiles connection probe", base::FilePath(), false, false);
+  Impl::Session session(owner, std::move(channel));
+  session.outgoing = true;
+  session.bootstrap_probe = true;
+  session.hotspot_connector = std::move(hotspot);
+  session.externally_cancelled = std::move(cancelled);
+  const bool handshake = session.Handshake(true) && session.Pair();
+  bool verified = false;
+  LOG(INFO) << "crQuickShare: Bootstrap handshake result; success=" << handshake
+            << "; stage=" << session.diagnostic_stage;
+  if (handshake) {
+    verified = session.RequestWifiUpgrade(socket_sent_bytes);
+  }
+  LOG(INFO) << "crQuickShare: Bootstrap upgrade result; handshake_success=" << handshake
+            << "; path_received=" << session.upgrade_path_received << "; path_rejected=" << session.upgrade_path_rejected
+            << "; upgrade_completed=" << session.upgrade_completed << "; channel_round_trip=" << verified
+            << "; encrypted_round_trip=" << (verified && !session.channel_plaintext)
+            << "; negotiated_plaintext=" << session.channel_plaintext
+            << "; protocol_failed=" << session.failed << "; medium=" << session.channel->name()
+            << "; attachments_sent=0";
+  session.Finish(handshake && !session.failed);
+  session.channel->Close();
+  session.CleanupNetwork();
+  return session.hotspot_connector ? verified : handshake;
+}
 void QuickShareService::Impl::Start(std::unique_ptr<TransportChannel> transport, std::optional<Request> outgoing,
                                   std::string initial_record) {
+  std::optional<Request> bluetooth_incoming;
+  if (outgoing && outgoing->incoming) {
+    bluetooth_incoming = std::move(outgoing);
+    outgoing.reset();
+    transport = std::move(bluetooth_incoming->bluetooth_channel);
+  }
   if (session_thread.joinable()) session_thread.join();
   Update([&](Snapshot& s) {
-    if (!outgoing) ++s.session;
+    if (!outgoing && !bluetooth_incoming) ++s.session;
     s.busy = true; s.incoming = !outgoing; s.phase = Phase::kConnecting;
     s.peer_name = outgoing ? outgoing->peer.name : std::string(); s.code.clear(); s.files.clear();
     s.text_count = 0; s.text_is_url = false;
@@ -1282,17 +1996,36 @@ void QuickShareService::Impl::Start(std::unique_ptr<TransportChannel> transport,
     ResetProgress();
   });
   session_thread = std::thread([this, transport = std::move(transport), outgoing = std::move(outgoing),
+                                bluetooth_incoming = std::move(bluetooth_incoming),
                                 initial_record = std::move(initial_record)]() mutable {
+    if (outgoing && outgoing->bluetooth_channel) transport = std::move(outgoing->bluetooth_channel);
     Session session(*this, std::move(transport));
+    if (outgoing && outgoing->socket_sent_bytes) {
+      session.bootstrap_probe = true;
+#if BUILDFLAG(IS_WIN)
+      session.lan_upgrade_enabled = true;
+#endif
+      session.bootstrap_sent_bytes = std::move(outgoing->socket_sent_bytes);
+      session.hotspot_connector = std::move(outgoing->hotspot);
+      session.externally_cancelled = std::move(outgoing->cancelled);
+    }
+    if (bluetooth_incoming) {
+      session.bluetooth_direct = true;
+      session.hotspot_connector = std::move(bluetooth_incoming->hotspot);
+      session.bootstrap_probe = true;
+      session.lan_upgrade_enabled = true;
+      session.bootstrap_sent_bytes = std::move(bluetooth_incoming->socket_sent_bytes);
+      session.externally_cancelled = std::move(bluetooth_incoming->cancelled);
+    }
     session.buffer = std::move(initial_record);
     session.outgoing = outgoing.has_value();
     std::vector<Session::File> prepared_files;
     qs::Frame prepared_intro;
     int64_t prepared_total = 0;
     const bool prepared = !outgoing || session.PrepareFiles(*outgoing, prepared_files, prepared_intro, prepared_total);
-    if (!outgoing) session.Stage("tcp_accepted");
+    if (!outgoing) session.Stage(bluetooth_incoming ? "bluetooth_accepted" : "tcp_accepted");
     bool connected = session.channel != nullptr;
-    if (outgoing && prepared && session.Active()) {
+    if (outgoing && !session.bootstrap_sent_bytes && prepared && session.Active()) {
       session.Stage("tcp_connect");
       LOG(INFO) << "crQuickShare: Selected discovery record; session=" << session.diagnostic_session
                 << "; cache_id=" << outgoing->peer.discovery_cache_id << "; interface=" << outgoing->peer.discovery_interface;
@@ -1371,6 +2104,7 @@ void QuickShareService::Impl::Start(std::unique_ptr<TransportChannel> transport,
     session.Stage("disconnect_cleanup");
     session.Finish(success);
     if (session.channel) session.channel->Close();
+    session.CleanupNetwork();  // Keep admission blocked until explicit cleanup finishes.
     Update([&](Snapshot& s) {
       s.busy = false;
       s.phase = session.empty_incoming_connection ? Phase::kIdle : result_phase;
@@ -1380,6 +2114,8 @@ void QuickShareService::Impl::Start(std::unique_ptr<TransportChannel> transport,
     refresh_advertisement = true;
     LOG(INFO) << "crQuickShare: Session released; receiving=" << receiving.load()
               << "; advertisement_refresh_requested=1";
+    if (outgoing && outgoing->finished) outgoing->finished();
+    if (bluetooth_incoming && bluetooth_incoming->finished) bluetooth_incoming->finished();
   });
 }
 void QuickShareService::Impl::Discover() {
@@ -1596,6 +2332,66 @@ bool QuickShareService::Send(const Peer& peer, std::vector<base::FilePath> paths
   impl_->ResetProgress();
   impl_->state.busy = true; impl_->state.phase = Phase::kConnecting; ++impl_->state.revision;
   impl_->request = Impl::Request{std::move(selected), std::move(paths)}; return true;
+}
+bool QuickShareService::SendBluetooth(const Peer& peer, std::vector<base::FilePath> paths,
+                                      std::unique_ptr<TransportChannel> channel,
+                                      std::function<uint64_t()> socket_sent_bytes,
+                                      HotspotConnector hotspot, std::function<bool()> cancelled,
+                                      std::function<void()> finished) {
+  std::lock_guard guard(impl_->mutex);
+  const auto reject = [](const char* reason) {
+    LOG(WARNING) << "crQuickShare: Send rejected before session; component=bluetooth_service; reason=" << reason;
+    return false;
+  };
+  if (!peer.ble_only || peer.id.size() != 4 || EndpointName(peer.endpoint_info).empty() || peer.classic_bluetooth_address.empty())
+    return reject("invalid_bluetooth_peer");
+  if (!channel || !socket_sent_bytes) return reject("transport_missing");
+  if (paths.empty()) return reject("empty_selection");
+  if (paths.size() > kMaxFiles) return reject("too_many_files");
+  if (!impl_->state.available) return reject("service_unavailable");
+  if (impl_->stop) return reject("service_stopping");
+  bool expected = false;
+  if (!impl_->busy.compare_exchange_strong(expected, true)) return reject("service_busy");
+  impl_->cancel = false; impl_->decision = 0;
+  ++impl_->state.session;
+  impl_->state.incoming = false; impl_->state.peer_name = peer.name;
+  impl_->state.peer_device_type = peer.endpoint_info.empty() ? 0 : (static_cast<uint8_t>(peer.endpoint_info[0]) >> 1) & 7;
+  impl_->state.code.clear(); impl_->state.files.clear();
+  impl_->state.transferred = impl_->state.total = 0; impl_->state.diagnostic.clear();
+  impl_->state.failure = Failure::kNone; impl_->ResetProgress();
+  impl_->state.busy = true; impl_->state.phase = Phase::kConnecting; ++impl_->state.revision;
+  impl_->request = Impl::Request{peer, std::move(paths), std::move(channel), std::move(socket_sent_bytes),
+                                std::move(hotspot), std::move(cancelled), std::move(finished)};
+  return true;
+}
+Peer QuickShareService::LocalPeer() const {
+  std::lock_guard guard(impl_->mutex);
+  Peer peer;
+  peer.id = impl_->endpoint; peer.name = impl_->name; peer.endpoint_info = impl_->endpoint_info;
+  return peer;
+}
+bool QuickShareService::ReceiveBluetooth(std::unique_ptr<TransportChannel> channel,
+                                        std::function<uint64_t()> socket_sent_bytes,
+                                        std::function<bool()> cancelled,
+                                        std::function<void()> finished, HotspotConnector hotspot) {
+  std::lock_guard guard(impl_->mutex);
+  if (!channel || !socket_sent_bytes || impl_->stop || !impl_->receiving ||
+      base::TimeTicks::Now() >= impl_->visible_until) return false;
+  bool expected = false;
+  if (!impl_->busy.compare_exchange_strong(expected, true)) return false;
+  impl_->cancel = false; impl_->decision = 0;
+  ++impl_->state.session;
+  impl_->state.incoming = true; impl_->state.busy = true;
+  impl_->state.phase = Phase::kConnecting;
+  impl_->state.peer_name.clear(); impl_->state.code.clear(); impl_->state.files.clear();
+  impl_->state.peer_device_type = 0; impl_->state.text_count = 0; impl_->state.text_is_url = false;
+  impl_->state.transferred = impl_->state.total = 0; impl_->state.diagnostic.clear();
+  impl_->state.received_directory.clear(); impl_->state.failure = Failure::kNone;
+  impl_->ResetProgress(); ++impl_->state.revision;
+  impl_->request = Impl::Request{{}, {}, std::move(channel), std::move(socket_sent_bytes),
+                                std::move(hotspot), std::move(cancelled), std::move(finished), true};
+  LOG(INFO) << "crQuickShare: Bluetooth incoming session admitted; session=" << impl_->state.session;
+  return true;
 }
 void QuickShareService::Confirm(bool accept) {
   std::lock_guard guard(impl_->mutex);

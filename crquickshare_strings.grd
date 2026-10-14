@@ -84,5 +84,8 @@
 <message name="IDS_CQS_FOLDER_HINT" desc="Quick Share directory selection and protocol limitations.">Send files with their folder structure. Empty folders are skipped. Up to 1024 files per transfer, including files inside folders. The receiver may handle folders differently.</message>
 <message name="IDS_CQS_CHOOSE_FOLDER" desc="Quick Share directory selection and protocol limitations.">Choose folder</message>
 <message name="IDS_CQS_SELECTED" desc="Quick Share directory selection and protocol limitations."><ph name="COUNT"><ex>2</ex>$1</ph> item(s) selected</message>
+<message name="IDS_CQS_RESTORING_NETWORK" desc="Quick Share network restoration or availability status.">Restoring network connection…</message>
+<message name="IDS_CQS_NETWORK_CLEANUP_FAILED" desc="Quick Share network restoration or availability status.">Network cleanup was incomplete. Check your Wi-Fi connection.</message>
+<message name="IDS_CQS_HOTSPOT_REQUIRED" desc="Quick Share network restoration or availability status.">Wi-Fi is unavailable. Select fewer or smaller files to send over Bluetooth.</message>
 </messages></release>
 </grit>

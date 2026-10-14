@@ -81,6 +81,7 @@ source_set("protocol") {
     "connection_listener.h",
     "file_storage.cc",
     "file_storage.h",
+    "hotspot_upgrade.h",
     "lan_discovery.cc",
     "lan_discovery.h",
     "lan_discovery_mdns.cc",
@@ -130,16 +131,29 @@ source_set("protocol") {
   # Uses the upstream protocol and crypto targets without ChromeOS platform
   # code.
 }
-if (is_linux && !is_chromeos) {
+if ((is_linux && !is_chromeos) || is_win) {
 source_set("ble") {
   public_deps = [ ":protocol" ]
-  sources = [ "ble_wakeup.cc", "ble_wakeup.h", "ble_discovery.cc", "ble_discovery.h" ]
+  sources = [ "ble_wakeup.cc", "ble_wakeup.h", "ble_discovery.cc", "ble_discovery.h", "bootstrap_probe.cc", "bootstrap_probe.h", "bluetooth_receiver.cc", "bluetooth_receiver.h" ]
+  if (is_linux) {
+    configs += [ "//build/config/linux/dbus" ]
+    sources += [ "hotspot_upgrade_linux.cc" ]
+  }
+  if (is_win) {
+    sources += [ "bluetooth_peripheral_win.cc", "bluetooth_peripheral_win.h" ]
+    libs = [ "runtimeobject.lib" ]
+  }
   if (enable_libcr_shared) {
     deps = [ "//libcr:engine" ]
   } else {
-    deps = [ "//base", "//crypto", "//device/bluetooth" ]
+    deps = [ "//base", "//crypto", "//device/bluetooth", "//net" ]
+    if (is_linux) {
+      deps += [ "//dbus" ]
+    }
   }
 }
+}
+if (is_linux && !is_chromeos) {
 executable("crQuickShare") {
   sources = [
     "crquickshare_main.cc",

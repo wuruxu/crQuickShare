@@ -51,4 +51,7 @@
 <translation id="1431933172646212969">La structure des dossiers est conservée. Les dossiers vides sont ignorés. Jusqu’à 1024 fichiers par transfert, y compris ceux des dossiers. Le destinataire peut traiter les dossiers différemment.</translation>
 <translation id="4532845899244822526">Choisir un dossier</translation>
 <translation id="9186448452346591728"><ph name="COUNT"/> élément(s) sélectionné(s)</translation>
+  <translation id="5125731858634756748">Rétablissement de la connexion réseau…</translation>
+  <translation id="3851611281675392532">Le nettoyage du réseau est incomplet. Vérifiez votre connexion Wi-Fi.</translation>
+  <translation id="6873287799323878567">Le Wi-Fi est indisponible. Sélectionnez moins de fichiers ou des fichiers plus petits pour les envoyer par Bluetooth.</translation>
 </translationbundle>

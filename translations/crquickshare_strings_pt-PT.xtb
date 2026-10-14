@@ -51,4 +51,7 @@
 <translation id="1431933172646212969">A estrutura das pastas é preservada. As pastas vazias são ignoradas. Até 1024 ficheiros por transferência, incluindo os ficheiros nas pastas. O destinatário pode tratar as pastas de outra forma.</translation>
 <translation id="4532845899244822526">Escolher pasta</translation>
 <translation id="9186448452346591728"><ph name="COUNT"/> item(ns) selecionado(s)</translation>
+  <translation id="5125731858634756748">A restaurar a ligação de rede…</translation>
+  <translation id="3851611281675392532">A limpeza da rede não foi concluída. Verifique a sua ligação Wi-Fi.</translation>
+  <translation id="6873287799323878567">O Wi-Fi está indisponível. Selecione menos ficheiros ou ficheiros mais pequenos para enviar por Bluetooth.</translation>
 </translationbundle>

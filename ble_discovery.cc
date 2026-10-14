@@ -1,6 +1,7 @@
 // Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license.
 #include "crQuickShare/ble_discovery.h"
+#include "crQuickShare/bootstrap_probe.h"
 #include <algorithm>
 #include <map>
 #include <optional>
@@ -41,6 +42,7 @@ constexpr size_t kMaxRecords = 128;
 
 struct AdvertisementDetails {
   uint16_t psm = 0;
+  size_t declared_payload = 0, available_payload = 0;
   size_t instant_connect_bytes = 0, unknown_tlvs = 0;
 };
 struct DctResult {
@@ -135,6 +137,7 @@ std::optional<Peer> ParseAdvertisement(std::string_view bytes, const char*& reas
     bytes.remove_prefix(4);
   }
   reason = "medium_payload_length";
+  if (details) { details->declared_payload = length; details->available_payload = bytes.size(); }
   if (length > bytes.size()) return std::nullopt;
   auto connection = bytes.substr(0, length);
   auto extra = bytes.substr(length);
@@ -187,7 +190,16 @@ std::optional<Peer> ParseAdvertisement(std::string_view bytes, const char*& reas
   if (!fast) {
     reason = "connection_bluetooth_address";
     if (connection.size() < 6) return std::nullopt;
-    connection.remove_prefix(6);  // Bluetooth MAC is not a LAN address.
+    const auto mac = connection.substr(0, 6);
+    if (std::ranges::any_of(mac, [](char c) { return c != 0; }) &&
+        !std::ranges::all_of(mac, [](char c) { return uint8_t(c) == 255; })) {
+      const auto hex = base::HexEncode(mac);
+      for (size_t i = 0; i < 6; ++i) {
+        if (i) result.classic_bluetooth_address += ':';
+        result.classic_bluetooth_address += hex.substr(i * 2, 2);
+      }
+    }
+    connection.remove_prefix(6);
   }
   reason = "connection_extensions";
   if (!connection.empty()) {
@@ -269,6 +281,13 @@ bool SameEndpoint(const Peer& a, const Peer& b) {
       ((static_cast<uint8_t>(a.endpoint_info[0]) ^
         static_cast<uint8_t>(b.endpoint_info[0])) & 0xef) == 0;
 }
+bool SameBluetoothRoute(const Peer& a, const Peer& b) {
+  // Only coalesce BLE list entries. A protocol-provided address is a routing
+  // hint, not authenticated identity, and must not weaken LAN association.
+  return a.ble_only && b.ble_only && a.id.size() == 4 && a.id == b.id &&
+      !a.classic_bluetooth_address.empty() &&
+      a.classic_bluetooth_address == b.classic_bluetooth_address;
+}
 std::string AdvertisementHash(std::string_view bytes) {
   const auto digest = crypto::hash::Sha256(bytes);
   return std::string(base::as_string_view(base::span(digest).first<4>()));
@@ -292,6 +311,10 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
   std::map<std::string, Observation> observations;
   std::map<std::string, base::TimeTicks> lost_hashes, lost_headers;
   uint64_t lost_removed = 0, lost_suppressed = 0, property_only = 0;
+  BootstrapProbe bootstrap;
+  bool bootstrap_waiting_for_gatt = false;
+  base::TimeTicks discovery_started;
+  bool first_candidate_logged = false, first_connectable_logged = false;
   scoped_refptr<device::BluetoothAdapter> adapter;
   std::unique_ptr<device::BluetoothDiscoverySession> session;
   std::map<std::string, Record> records;
@@ -305,6 +328,9 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
     base::TimeTicks seen, retry, last_attempt;
     // A fresh header proves presence, not freshness of previously read slots.
     std::map<unsigned, Record> slots;
+    base::TimeTicks resolved = {};  // Full read started here; advertising never renews it.
+    unsigned failures = 0;
+    bool skip_logged = false;
   };
   struct GattRequest {
     uint64_t token;
@@ -312,7 +338,9 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
     unsigned slots = 0, next_slot = 0;
     bool reading = false, services_discovered = false;
     unsigned read_failures = 0;
-    base::TimeTicks deadline;
+    std::set<unsigned> short_read_retried;
+    base::TimeTicks deadline, started, stage_started;
+    const char* stage = "connect_callback";
     std::unique_ptr<device::BluetoothGattConnection> connection;
     // Missing key: read failed; null value: successfully read, no endpoint.
     std::map<unsigned, std::optional<Record>> results;
@@ -322,11 +350,18 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
   std::optional<GattRequest> gatt_request;
   uint64_t next_gatt_token = 0, gatt_attempts = 0, gatt_reads = 0;
   uint64_t gatt_expired_slots = 0, gatt_partial_refreshes = 0;
+  uint64_t gatt_ready_skips = 0, gatt_backoffs = 0;
   bool gatt_connect_pending = false;
+  base::OnceClosure connection_ready_callback;
+  base::TimeTicks connection_wait_started;
+  uint64_t pending_gatt_token = 0;
+  std::string pending_gatt_address;
+  base::TimeTicks pending_gatt_started, next_gatt_blocked_log;
   base::TimeTicks next_gatt_start;
   base::TimeTicks next_association_log;
   State current = State::kIdle;
   bool wanted = false, initializing = false, pending = false;
+  bool retain_cache = false;
   base::TimeTicks retry_after, next_ignored_log, next_summary;
   uint64_t ignored = 0, notifications = 0, fef3 = 0, dct = 0, fast_initiation = 0, recognized = 0;
   uint64_t on_lost = 0, named_updates = 0, large_fast = 0;
@@ -352,17 +387,25 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
     std::erase_if(lost_hashes, [&](const auto& entry) { return entry.second <= now; });
     std::erase_if(records, [&](const auto& entry) { return now - entry.second.seen >= kLifetime; });
     std::erase_if(dct_records, [&](const auto& entry) { return now - entry.second.seen >= kLifetime; });
-    if (!wanted || !adapter || !adapter->IsPresent() || !adapter->IsPowered()) {
-      gatt_entries.clear(); FinishGatt("stopped", false);
-      session.reset(); records.clear(); dct_records.clear(); starting_devices.clear(); observations.clear(); lost_hashes.clear(); lost_headers.clear();
-      current = !wanted ? State::kIdle : initializing ? State::kStarting : State::kUnavailable;
-      return;
-    }
     for (auto& [address, entry] : gatt_entries) {
       gatt_expired_slots += std::erase_if(entry.slots, [&](const auto& slot) {
         return now - slot.second.seen >= kLifetime;
       });
     }
+    std::erase_if(gatt_entries, [&](const auto& entry) { return now - entry.second.seen >= kLifetime; });
+    if (!wanted || !adapter || !adapter->IsPresent() || !adapter->IsPowered()) {
+      FinishGatt(retain_cache ? "paused" : "stopped", false);
+      session.reset(); starting_devices.clear(); observations.clear();
+      if (!retain_cache || !adapter || !adapter->IsPresent() || !adapter->IsPowered()) {
+        gatt_entries.clear(); records.clear(); dct_records.clear(); lost_hashes.clear(); lost_headers.clear();
+      }
+      current = !wanted ? State::kIdle : initializing ? State::kStarting : State::kUnavailable;
+      return;
+    }
+    // Service discovery/read callbacks may never arrive after the LE link
+    // drops. Release this request promptly instead of consuming its deadline.
+    if (gatt_request && gatt_request->connection && !gatt_request->connection->IsConnected())
+      FinishGatt("disconnected", false, true);
     if (gatt_request && now >= gatt_request->deadline) FinishGatt("timed_out", false, true);
     if (pending) { current = State::kStarting; return; }
     if (session && session->IsActive()) {
@@ -383,6 +426,7 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
                   << "; property_only=" << property_only
                   << "; gatt_attempts=" << gatt_attempts << "; gatt_reads=" << gatt_reads
                   << "; gatt_expired_slots=" << gatt_expired_slots << "; gatt_partial_refreshes=" << gatt_partial_refreshes
+                  << "; gatt_ready_skips=" << gatt_ready_skips << "; gatt_backoffs=" << gatt_backoffs
                   << "; dct_recognized=" << dct_recognized << "; dct_endpoints=" << dct_records.size()
                   << "; extended_recognized=" << extended_recognized << "; parsed_extensions=" << parsed_extensions
                   << "; gatt_candidates=" << gatt_entries.size()
@@ -408,6 +452,8 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
   }
   void OnStarted(std::unique_ptr<device::BluetoothDiscoverySession> value) {
     pending = false; session = std::move(value);
+    discovery_started = base::TimeTicks::Now();
+    first_candidate_logged = first_connectable_logged = false;
     auto observed_during_start = std::move(starting_devices);
     starting_devices.clear();
     next_summary = base::TimeTicks::Now() + base::Seconds(15);
@@ -566,6 +612,7 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
           // the normal retry, but rate-limit header rotation per address.
           const size_t cleared_slots = entry->second.slots.size();
           entry->second.header = std::move(*header); entry->second.slots.clear();
+          entry->second.resolved = {}; entry->second.failures = 0; entry->second.skip_logged = false;
           entry->second.retry = std::max(now, entry->second.last_attempt + base::Seconds(5));
           LOG(INFO) << "crQuickShare: BLE GATT header changed; cached_slots_cleared=" << cleared_slots << "; refresh_delay_ms="
                     << (entry->second.retry - now).InMilliseconds();
@@ -620,6 +667,14 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
       LOG(INFO) << "crQuickShare: BLE endpoint updated; name_present=1";
     records.insert_or_assign(address, Record{std::move(*peer), now, advertisement_hash});
   }
+  void NotifyConnectionReady() {
+    if (!wanted && !gatt_request && !gatt_connect_pending && connection_ready_callback) {
+      LOG(INFO) << "crQuickShare: BLE send connection ready; gatt_wait_ms="
+                << (base::TimeTicks::Now() - connection_wait_started).InMilliseconds();
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+          FROM_HERE, std::move(connection_ready_callback));
+    }
+  }
   void FinishGatt(const char* outcome, bool commit, bool allow_partial = false) {
     if (!gatt_request) return;
     // Clear active state before releasing the connection (BlueZ can notify).
@@ -630,7 +685,27 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
     size_t updated = 0, cleared = 0;
     if (entry != gatt_entries.end() && entry->second.header.bytes == done.header) {
       const bool complete = commit && !done.read_failures;
-      entry->second.retry = now + base::Seconds(complete ? 60 : 30);
+      const bool failed = commit || std::string_view(outcome) == "connect_failed" ||
+          std::string_view(outcome) == "disconnected" || std::string_view(outcome) == "timed_out" ||
+          std::string_view(outcome) == "expired_or_timed_out" ||
+          std::string_view(outcome) == "service_unavailable";
+      if (complete) {
+        entry->second.failures = 0;
+        entry->second.resolved = done.started;
+        entry->second.retry = now + base::Seconds(60);
+      } else if (failed) {
+        entry->second.failures = std::min(entry->second.failures + 1, 3u);
+        const unsigned delay = 30u << (entry->second.failures - 1);
+        entry->second.retry = now + base::Seconds(delay);
+        ++gatt_backoffs;
+        LOG(INFO) << "crQuickShare: BLE GATT retry deferred; request=" << done.token
+                  << "; failures=" << entry->second.failures << "; retry_ms=" << delay * 1000
+                  << "; reason=" << outcome;
+      }
+      // Pausing or cancellation is not a device failure. Partial reads cannot
+      // establish that every slot is known, even if one endpoint is usable.
+      if (!complete) entry->second.resolved = {};
+      entry->second.skip_logged = false;
       if ((commit || allow_partial) && wanted && now - entry->second.seen < kLifetime &&
           !lost_headers.contains(done.header)) {
         // Failed slots keep their original expiry. Successful empty/foreign
@@ -642,9 +717,63 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
         if (!complete && !done.results.empty()) ++gatt_partial_refreshes;
       }
     }
+    auto* device = adapter ? adapter->GetDevice(done.address) : nullptr;
     LOG(INFO) << "crQuickShare: BLE GATT resolution finished; request=" << done.token
+              << "; address=" << done.address << "; stage=" << done.stage
+              << "; elapsed_ms=" << (now - done.started).InMilliseconds()
+              << "; stage_elapsed_ms=" << (now - done.stage_started).InMilliseconds()
+              << "; connect_pending=" << gatt_connect_pending
+              << "; connection_present=" << bool(done.connection)
+              << "; connection_connected=" << (done.connection && done.connection->IsConnected())
+              << "; services_notified=" << done.services_discovered
+              << "; device_present=" << bool(device)
+              << "; gatt_connected=" << (device && device->IsGattConnected())
+              << "; services_complete=" << (device && device->IsGattServicesDiscoveryComplete())
               << "; outcome=" << outcome << "; slots_visited=" << done.next_slot
               << "; read_failures=" << done.read_failures << "; slots_updated=" << updated << "; slots_cleared=" << cleared;
+    done.connection.reset();
+    NotifyConnectionReady();
+  }
+  void GattStage(const char* stage, device::BluetoothDevice* device) {
+    if (!gatt_request || std::string_view(gatt_request->stage) == stage) return;
+    const auto now = base::TimeTicks::Now();
+    LOG(INFO) << "crQuickShare: BLE GATT stage; request=" << gatt_request->token
+              << "; address=" << gatt_request->address << "; stage=" << stage
+              << "; previous_stage=" << gatt_request->stage
+              << "; previous_elapsed_ms=" << (now - gatt_request->stage_started).InMilliseconds()
+              << "; elapsed_ms=" << (now - gatt_request->started).InMilliseconds()
+              << "; device_present=" << bool(device)
+              << "; gatt_connected=" << (device && device->IsGattConnected())
+              << "; services_complete=" << (device && device->IsGattServicesDiscoveryComplete());
+    gatt_request->stage = stage;
+    gatt_request->stage_started = now;
+  }
+  bool SendReady(const Record& record, base::TimeTicks now) const {
+    bool named = false, routed = false;
+    auto include = [&](const Record& other) {
+      if (now - other.seen >= kLifetime || !SameEndpoint(record.peer, other.peer)) return;
+      named |= !EndpointName(other.peer.endpoint_info).empty();
+      routed |= !other.peer.classic_bluetooth_address.empty();
+    };
+    include(record);
+    if (named && routed) return true;
+    // Associate only protocol discovery keys + endpoint/header, never display
+    // names, BLE addresses, or a bloom-filter/header hash alone.
+    for (const auto& [address, other] : records) include(other);
+    for (const auto& [address, entry] : gatt_entries) {
+      if (now - entry.seen >= kLifetime) continue;
+      for (const auto& [slot, other] : entry.slots) include(other);
+    }
+    return named && routed;
+  }
+  int GattPriority(const GattEntry& entry, base::TimeTicks now) const {
+    bool known = false;
+    for (const auto& [slot, record] : entry.slots) {
+      if (now - record.seen >= kLifetime) continue;
+      known = true;
+      if (!SendReady(record, now)) return 0;  // Known endpoint missing send metadata.
+    }
+    return known ? 2 : 1;  // Unknown headers still get their initial resolution.
   }
   void PumpGatt() {
     const auto now = base::TimeTicks::Now();
@@ -656,36 +785,98 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
     }
     // A timed-out connect has no reference to release yet. Wait for its OS
     // callback instead of accumulating uncancellable connection attempts.
-    if (gatt_connect_pending || now < next_gatt_start) return;
+    if (gatt_connect_pending) {
+      if (now >= next_gatt_blocked_log) {
+        LOG(INFO) << "crQuickShare: BLE GATT scheduler blocked; request=" << pending_gatt_token
+                  << "; address=" << pending_gatt_address << "; reason=connect_callback_pending"
+                  << "; elapsed_ms=" << (now - pending_gatt_started).InMilliseconds()
+                  << "; candidates=" << gatt_entries.size();
+        next_gatt_blocked_log = now + base::Seconds(5);
+      }
+      return;
+    }
+    if (bootstrap_waiting_for_gatt || bootstrap.active() || now < next_gatt_start) return;
     auto candidate = gatt_entries.end();
+    int selected_priority = 3;
     for (auto it = gatt_entries.begin(); it != gatt_entries.end(); ++it) {
       if (now < it->second.retry || !adapter->GetDevice(it->first)) continue;
-      if (candidate == gatt_entries.end() || it->second.retry < candidate->second.retry) candidate = it;
+      auto& entry = it->second;
+      const int priority = GattPriority(entry, now);
+      // Refresh before slot expiry so skipping a redundant read does not
+      // deliberately create a gap in the visible device cache.
+      if (priority == 2 && !entry.resolved.is_null() &&
+          now - entry.resolved < kLifetime - base::Seconds(15)) {
+        if (!entry.skip_logged) {
+          entry.skip_logged = true; ++gatt_ready_skips;
+          LOG(INFO) << "crQuickShare: BLE GATT resolution skipped; reason=send_metadata_ready"
+                    << "; known_slots=" << entry.slots.size()
+                    << "; resolved_age_ms=" << (now - entry.resolved).InMilliseconds();
+        }
+        continue;
+      }
+      entry.skip_logged = false;
+      if (candidate == gatt_entries.end() || priority < selected_priority ||
+          (priority == selected_priority && entry.retry < candidate->second.retry)) {
+        candidate = it; selected_priority = priority;
+      }
     }
     if (candidate != gatt_entries.end()) {
       auto& [address, entry] = *candidate;
       auto* device = adapter->GetDevice(address);
       entry.retry = now + base::Seconds(30);
       entry.last_attempt = now;
+      LOG(INFO) << "crQuickShare: BLE GATT candidate selected; priority="
+                << (selected_priority == 0 ? "missing_metadata" : selected_priority == 1 ? "unknown" : "refresh")
+                << "; failures=" << entry.failures;
       gatt_request.emplace();
       gatt_request->token = ++next_gatt_token;
       gatt_request->address = address; gatt_request->header = entry.header.bytes;
       gatt_request->slots = entry.header.slots;
+      gatt_request->started = now;
+      gatt_request->stage_started = now;
       gatt_request->deadline = now + base::Seconds(15);
       gatt_connect_pending = true; ++gatt_attempts;
+      pending_gatt_token = next_gatt_token;
+      pending_gatt_address = address;
+      pending_gatt_started = now;
+      next_gatt_blocked_log = now;
       LOG(INFO) << "crQuickShare: BLE GATT connect requested; request=" << next_gatt_token
+                << "; address=" << address << "; stage=connect_callback"
+                << "; gatt_connected=" << device->IsGattConnected()
+                << "; services_complete=" << device->IsGattServicesDiscoveryComplete()
                 << "; slots=" << entry.header.slots;
-      device->CreateGattConnection(base::BindOnce(&Impl::OnGattConnected, weak.GetWeakPtr(), next_gatt_token),
+      device->CreateGattConnection(base::BindOnce(&Impl::OnGattConnected, weak.GetWeakPtr(), next_gatt_token, address, now),
                                   device::BluetoothUUID(kServiceUuid));
       return;
     }
   }
-  void OnGattConnected(uint64_t token, std::unique_ptr<device::BluetoothGattConnection> connection,
+  void OnGattConnected(uint64_t token, const std::string& address, base::TimeTicks started,
+                       std::unique_ptr<device::BluetoothGattConnection> connection,
                        std::optional<device::BluetoothDevice::ConnectErrorCode> error) {
-    gatt_connect_pending = false;
-    if (!gatt_request || gatt_request->token != token || !wanted) return;
+    if (pending_gatt_token == token) {
+      gatt_connect_pending = false;
+      pending_gatt_token = 0;
+      pending_gatt_address.clear();
+    }
+    auto* device = adapter ? adapter->GetDevice(address) : nullptr;
+    LOG(INFO) << "crQuickShare: BLE GATT connect callback; request=" << token
+              << "; address=" << address
+              << "; elapsed_ms=" << (base::TimeTicks::Now() - started).InMilliseconds()
+              << "; stale=" << (!gatt_request || gatt_request->token != token || !wanted)
+              << "; error=" << (error ? static_cast<int>(*error) : -1)
+              << "; connection_present=" << bool(connection)
+              << "; connection_connected=" << (connection && connection->IsConnected())
+              << "; device_present=" << bool(device)
+              << "; gatt_connected=" << (device && device->IsGattConnected())
+              << "; services_complete=" << (device && device->IsGattServicesDiscoveryComplete());
+    if (!gatt_request || gatt_request->token != token || !wanted) {
+      connection.reset();
+      NotifyConnectionReady();
+      return;
+    }
     if (error || !connection || !connection->IsConnected()) { FinishGatt("connect_failed", false); return; }
     gatt_request->connection = std::move(connection);
+    GattStage("wait_services", device);
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
         base::BindOnce(&Impl::ReadGattSlot, weak.GetWeakPtr(), token));
   }
@@ -704,6 +895,7 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
     // BlueZ exposes ServicesResolved on the device; its per-service
     // IsDiscoveryComplete flag is not maintained by this backend.
     if (!gatt_request->services_discovered && !device->IsGattServicesDiscoveryComplete()) return;
+    GattStage("find_service", device);
     device::BluetoothRemoteGattService* target = nullptr;
     for (auto* service : device->GetGattServices()) {
       if (service->GetUUID() == device::BluetoothUUID(kServiceUuid)) { target = service; break; }
@@ -714,18 +906,31 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
       // bleutils::GenerateAdvertisementUuid(slot), slots are zero-based.
       const device::BluetoothUUID uuid(base::StringPrintf("00000000-0000-3000-8000-%012x", slot));
       const auto characteristics = target->GetCharacteristicsByUUID(uuid);
-      if (characteristics.empty()) { ++gatt_request->read_failures; continue; }
+      if (characteristics.empty()) {
+        ++gatt_request->read_failures;
+        LOG(INFO) << "crQuickShare: BLE GATT slot unavailable; request=" << token
+                  << "; slot=" << slot << "; reason=characteristic_missing";
+        continue;
+      }
       gatt_request->reading = true;
+      GattStage("read_characteristic", device);
+      LOG(INFO) << "crQuickShare: BLE GATT read requested; request=" << token
+                << "; address=" << gatt_request->address << "; slot=" << slot;
       characteristics.front()->ReadRemoteCharacteristic(
           base::BindOnce(&Impl::OnGattRead, weak.GetWeakPtr(), token));
       return;
     }
-    FinishGatt("complete", true);
+    FinishGatt(gatt_request->read_failures ? "partial" : "complete", true);
   }
   void OnGattRead(uint64_t token, std::optional<device::BluetoothGattService::GattErrorCode> error,
                   const std::vector<uint8_t>& value) {
     if (!gatt_request || gatt_request->token != token || !wanted) return;
+    LOG(INFO) << "crQuickShare: BLE GATT read callback; request=" << token
+              << "; address=" << gatt_request->address << "; slot=" << (gatt_request->next_slot - 1)
+              << "; elapsed_ms=" << (base::TimeTicks::Now() - gatt_request->stage_started).InMilliseconds()
+              << "; bytes=" << value.size() << "; error=" << (error ? static_cast<int>(*error) : -1);
     gatt_request->reading = false; ++gatt_reads;
+    GattStage("process_read", adapter ? adapter->GetDevice(gatt_request->address) : nullptr);
     if (base::TimeTicks::Now() >= gatt_request->deadline) {
       base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
           base::BindOnce(&Impl::ReadGattSlot, weak.GetWeakPtr(), token));
@@ -734,12 +939,28 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
     const char* reason = error ? "read_failed" : value.empty() ? "empty_slot" : "gatt_requires_regular_advertisement";
     const unsigned slot = gatt_request->next_slot - 1;
     if (error) ++gatt_request->read_failures;
-    else gatt_request->results.emplace(slot, std::nullopt);
+    else if (value.empty()) gatt_request->results.emplace(slot, std::nullopt);
     std::optional<Peer> peer;
+    AdvertisementDetails details;
     // GATT slots may belong to other Nearby services. Require the regular
     // layout with explicit service hashes; no UUID-only identification.
     if (!error && !value.empty() && !(value.front() & 2))
-      peer = ParseAdvertisement(base::as_string_view(base::span(value)), reason);
+      peer = ParseAdvertisement(base::as_string_view(base::span(value)), reason, &details);
+    if (!error && !peer && std::string_view(reason) == "medium_payload_length" &&
+        details.declared_payload <= 504 && details.declared_payload > details.available_payload &&
+        gatt_request->short_read_retried.insert(slot).second) {
+      LOG(INFO) << "crQuickShare: BLE GATT short value retry; request=" << token << "; slot=" << slot
+                << "; bytes=" << value.size() << "; declared_payload=" << details.declared_payload
+                << "; available_payload=" << details.available_payload
+                << "; read_api=bluez_read_value; retry=whole_value; append=0";
+      // Chromium's BlueZ API reads with an empty options dictionary. It does
+      // not expose an offset here. Retry the entire value once; never combine
+      // different snapshots or accept a prefix as a complete advertisement.
+      --gatt_request->next_slot;
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(FROM_HERE,
+          base::BindOnce(&Impl::ReadGattSlot, weak.GetWeakPtr(), token), base::Milliseconds(200));
+      return;
+    }
     if (peer) {
       const auto hash = AdvertisementHash(base::as_string_view(base::span(value)));
       if (auto lost = lost_hashes.find(hash); lost != lost_hashes.end() && lost->second > base::TimeTicks::Now()) {
@@ -755,11 +976,19 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
       if (!peer->name.empty()) ++named_updates;
       gatt_request->results.insert_or_assign(slot, Record{*peer, base::TimeTicks::Now(), hash});
       LOG(INFO) << "crQuickShare: BLE GATT endpoint resolved; request=" << token
+                << "; address=" << gatt_request->address << "; endpoint_id=" << base::HexEncode(peer->id)
                 << "; name_present=" << !peer->name.empty();
     } else {
+      // A nonempty invalid read is not evidence that the old slot disappeared.
+      // Preserve its original expiry and retry with the partial-refresh delay.
+      if (!error && !value.empty()) ++gatt_request->read_failures;
       DiagnoseParse("gatt", reason, value.size());
       LOG(INFO) << "crQuickShare: BLE GATT slot skipped; request=" << token
+                << "; slot=" << slot
                 << "; bytes=" << value.size() << "; parse_stage=" << reason
+                << "; declared_payload=" << details.declared_payload
+                << "; available_payload=" << details.available_payload
+                << "; medium_header=" << (value.empty() ? -1 : static_cast<int>(value.front()))
                 << "; error=" << (error ? static_cast<int>(*error) : -1);
     }
     // Release native read callback frames before reading again or disconnecting.
@@ -768,6 +997,12 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
   }
   void GattServicesDiscovered(device::BluetoothAdapter*, device::BluetoothDevice* device) override {
     if (gatt_request && gatt_request->address == device->GetAddress()) {
+      if (!gatt_request->services_discovered)
+        LOG(INFO) << "crQuickShare: BLE GATT services discovered; request=" << gatt_request->token
+                  << "; address=" << device->GetAddress()
+                  << "; elapsed_ms=" << (base::TimeTicks::Now() - gatt_request->started).InMilliseconds()
+                  << "; gatt_connected=" << device->IsGattConnected()
+                  << "; services_complete=" << device->IsGattServicesDiscoveryComplete();
       gatt_request->services_discovered = true;
       base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
           base::BindOnce(&Impl::ReadGattSlot, weak.GetWeakPtr(), gatt_request->token));
@@ -808,16 +1043,25 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
 };
 BleDiscovery::BleDiscovery() : impl_(std::make_unique<Impl>()) {}
 BleDiscovery::~BleDiscovery() = default;
-void BleDiscovery::Update(bool enabled) {
+void BleDiscovery::Update(bool enabled, bool retain_cache) {
+  const bool preserve = !enabled && retain_cache;
+  if (impl_->retain_cache != preserve) {
+    LOG(INFO) << "crQuickShare: BLE discovery cache retention; paused=" << preserve
+              << "; advertisement_records=" << impl_->records.size()
+              << "; gatt_entries=" << impl_->gatt_entries.size();
+  }
+  impl_->retain_cache = preserve;
   if (impl_->wanted != enabled) {
     LOG(INFO) << "crQuickShare: BLE discovery requested; enabled=" << enabled;
     impl_->wanted = enabled; impl_->retry_after = {};
     if (enabled) {
+      impl_->connection_ready_callback.Reset();
       impl_->notifications = impl_->fef3 = impl_->dct = impl_->fast_initiation = 0;
       impl_->recognized = impl_->ignored = 0;
       impl_->on_lost = impl_->named_updates = impl_->large_fast = 0;
       impl_->gatt_attempts = impl_->gatt_reads = 0;
       impl_->gatt_expired_slots = impl_->gatt_partial_refreshes = 0;
+      impl_->gatt_ready_skips = impl_->gatt_backoffs = 0;
       impl_->dct_recognized = impl_->extended_recognized = impl_->parsed_extensions = 0;
       impl_->parse_counts.clear();
       impl_->lost_removed = impl_->lost_suppressed = impl_->property_only = 0;
@@ -825,9 +1069,20 @@ void BleDiscovery::Update(bool enabled) {
       impl_->next_association_log = {};
     }
   }
+  if (!enabled) { impl_->bootstrap_waiting_for_gatt = false; impl_->bootstrap.Cancel(); }
   impl_->Reconcile();
 }
 BleDiscovery::State BleDiscovery::state() const { return impl_->current; }
+scoped_refptr<device::BluetoothAdapter> BleDiscovery::adapter() const { return impl_->adapter; }
+void BleDiscovery::WhenConnectionReady(base::OnceClosure callback) {
+  impl_->connection_wait_started = base::TimeTicks::Now();
+  impl_->connection_ready_callback = std::move(callback);
+  if (impl_->gatt_request || impl_->gatt_connect_pending)
+    LOG(INFO) << "crQuickShare: BLE send waiting for GATT release; connect_pending="
+              << impl_->gatt_connect_pending;
+  impl_->NotifyConnectionReady();
+}
+bool BleDiscovery::bootstrap_active() const { return impl_->bootstrap.active(); }
 std::vector<Peer> BleDiscovery::MergeWithLan(std::vector<Peer> peers) const {
   struct Candidate {
     Peer peer;
@@ -836,18 +1091,46 @@ std::vector<Peer> BleDiscovery::MergeWithLan(std::vector<Peer> peers) const {
     std::string system_name;
   };
   std::vector<Candidate> candidates;
+  bool probe_candidate = false;
   const auto now = base::TimeTicks::Now();
   auto append = [&](const Peer& peer, const std::string& address,
                     base::TimeTicks seen, const char* source) {
     if (now - seen >= kLifetime) return;
+    if (!impl_->discovery_started.is_null()) {
+      const bool connectable = !EndpointName(peer.endpoint_info).empty() &&
+          !peer.classic_bluetooth_address.empty();
+      if (!impl_->first_candidate_logged || (connectable && !impl_->first_connectable_logged)) {
+        LOG(INFO) << "crQuickShare: BLE discovery readiness; source=" << source
+                  << "; elapsed_ms=" << (now - impl_->discovery_started).InMilliseconds()
+                  << "; record_age_ms=" << (now - seen).InMilliseconds()
+                  << "; retained_before_scan=" << (seen < impl_->discovery_started)
+                  << "; public_name=" << !EndpointName(peer.endpoint_info).empty()
+                  << "; classic_address_present=" << !peer.classic_bluetooth_address.empty()
+                  << "; connectable=" << connectable;
+        impl_->first_candidate_logged = true;
+        impl_->first_connectable_logged |= connectable;
+      }
+    }
     candidates.push_back({peer, seen, source, SystemName(impl_->adapter.get(), address)});
     candidates.back().peer.bluetooth_address = address;
+    if (impl_->bootstrap.CanProbe(peer)) {
+      probe_candidate = true;
+      if (impl_->gatt_request || impl_->gatt_connect_pending) {
+        if (!impl_->bootstrap_waiting_for_gatt)
+          LOG(INFO) << "crQuickShare: Bootstrap waiting for GATT; connect_pending=" << impl_->gatt_connect_pending;
+        impl_->bootstrap_waiting_for_gatt = true;
+      } else {
+        impl_->bootstrap_waiting_for_gatt = false;
+        impl_->bootstrap.Observe(impl_->adapter, peer);
+      }
+    }
   };
   for (const auto& [address, record] : impl_->records)
     append(record.peer, address, record.seen, "advertisement");
   for (const auto& [address, entry] : impl_->gatt_entries)
     for (const auto& [slot, record] : entry.slots)
       append(record.peer, address, std::min(entry.seen, record.seen), "gatt");
+  if (!probe_candidate) impl_->bootstrap_waiting_for_gatt = false;
   // Retain the most recently observed address, instead of the first address in
   // map order. A protocol name from an older matching record can still help.
   std::ranges::stable_sort(candidates, [](const Candidate& a, const Candidate& b) {
@@ -875,6 +1158,7 @@ std::vector<Peer> BleDiscovery::MergeWithLan(std::vector<Peer> peers) const {
                 << "; info_header=" << static_cast<unsigned>(static_cast<uint8_t>(peer.endpoint_info[0]))
                 << "; name_source=" << (!peer.name.empty() ? "quick_share" :
                     !item.system_name.empty() ? "bluez" : "none")
+                << "; classic_address_present=" << !peer.classic_bluetooth_address.empty()
                 << "; age_ms=" << (now - item.seen).InMilliseconds()
                 << "; lan_match=" << std::ranges::any_of(peers, [&](const Peer& lan) { return SameEndpoint(lan, peer); });
       size_t lan_logged = 0;
@@ -899,12 +1183,16 @@ std::vector<Peer> BleDiscovery::MergeWithLan(std::vector<Peer> peers) const {
         const bool same_name = !name.empty() && name == other_name;
         const bool same_id = peer.id == other.peer.id;
         const bool same_key = SameDiscoveryKey(peer, other.peer);
+        const bool same_endpoint = SameEndpoint(peer, other.peer);
+        const bool same_route = SameBluetoothRoute(peer, other.peer);
         if (!same_name && !same_id && !same_key) continue;
         LOG(INFO) << "crQuickShare: BLE association pair; first=" << j << "; second=" << i
                   << "; same_display_name=" << same_name << "; same_endpoint_id=" << same_id
                   << "; same_discovery_key=" << same_key
                   << "; same_header=" << (peer.endpoint_info[0] == other.peer.endpoint_info[0])
-                  << "; merge=" << SameEndpoint(peer, other.peer);
+                  << "; same_bluetooth_route=" << same_route
+                  << "; merge=" << (same_endpoint || same_route)
+                  << "; merge_reason=" << (same_endpoint ? "discovery_key" : same_route ? "bluetooth_route" : "distinct");
       }
     }
   }
@@ -924,9 +1212,20 @@ std::vector<Peer> BleDiscovery::MergeWithLan(std::vector<Peer> peers) const {
   for (const auto& item : candidates) {
     const auto& candidate = item.peer;
     if (std::ranges::any_of(peers, [&](const Peer& peer) { return SameEndpoint(peer, candidate); })) continue;
-    auto existing = std::ranges::find_if(nearby, [&](const Peer& peer) { return SameEndpoint(peer, candidate); });
+    auto existing = std::ranges::find_if(nearby, [&](const Peer& peer) {
+      return SameEndpoint(peer, candidate) || SameBluetoothRoute(peer, candidate);
+    });
     if (existing == nearby.end()) nearby.push_back(candidate);
-    else if (existing->name.empty() && !candidate.name.empty()) existing->name = candidate.name;
+    else if (SameEndpoint(*existing, candidate)) {
+      // Candidates are newest first. Across discovery-key rotations retain
+      // the latest record intact; only supplement matching discovery data.
+      if (existing->name.empty() && !candidate.name.empty()) {
+        existing->name = candidate.name;
+        existing->endpoint_info = candidate.endpoint_info;
+      }
+      if (existing->classic_bluetooth_address.empty())
+        existing->classic_bluetooth_address = candidate.classic_bluetooth_address;
+    }
   }
   // Apply BlueZ names after protocol-name merging; do not alter cached
   // identities, TTLs, or diagnostics about names carried in advertisements.

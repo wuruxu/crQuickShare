@@ -4,12 +4,15 @@
 #define CRQUICKSHARE_QUICK_SHARE_SERVICE_H_
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 #include "base/files/file_path.h"
+#include "crQuickShare/hotspot_upgrade.h"
 
 namespace crquickshare {
+class TransportChannel;
 struct LanRoute {
   std::string address, local_address;
   unsigned interface_index = 0;
@@ -23,18 +26,19 @@ struct Peer {
   std::vector<std::string> alternate_addresses;
   std::vector<LanRoute> routes;  // Each address retains its discovery interface and source IPv4.
   std::string endpoint_info;  // Untrusted discovery identity, used only to deduplicate.
+  std::string classic_bluetooth_address;  // Only the explicit connection-advertisement MAC.
   std::string public_name_info;  // Matching public BLE endpoint info; display hint only.
   std::string bluetooth_address;  // Display only; never a transport address or identity.
-  bool ble_only = false;  // No LAN address; must never be passed to Send().
+  bool ble_only = false;  // No LAN address; use SendBluetooth(), not Send().
   // Local diagnostics only, never serialized or used for authentication.
   uint64_t discovery_cache_id = 0;
   unsigned discovery_interface = 0;
   bool operator==(const Peer&) const = default;
 };
 enum class Phase { kIdle, kConnecting, kConfirm, kWaiting, kTransferring,
-                   kComplete, kSent, kRejected, kCancelled, kTimedOut, kError };
+                   kRestoringNetwork, kComplete, kSent, kRejected, kCancelled, kTimedOut, kError };
 enum class Failure { kNone, kConnection, kNetwork, kStorage, kSourceFile,
-                     kUnsupported, kProtocol };
+                     kUnsupported, kProtocol, kHotspotUnavailable };
 struct Snapshot {
   std::vector<Peer> peers;
   Phase phase = Phase::kIdle;
@@ -62,6 +66,7 @@ struct Snapshot {
   // Diagnostic only; UI presents a localized error, details go to the log.
   std::string diagnostic;
   Failure failure = Failure::kNone;
+  bool network_cleanup_failed = false;
   base::FilePath received_directory;
 };
 class QuickShareService {
@@ -70,6 +75,16 @@ class QuickShareService {
   QuickShareService(std::string name, base::FilePath destination, bool receive_text = false);
   ~QuickShareService();
   Snapshot GetSnapshot() const;
+  // Blocking worker-only experiment: handshake, anonymous pairing, optional
+  // hotspot upgrade verification, then close.
+  // Does not start discovery or introduce attachments. An explicitly supplied
+  // hotspot connector enables real network/channel migration and rollback.
+  // socket_sent_bytes returns a thread-safe cumulative count of completed
+  // socket writes on this channel, starting at zero (not queued bytes).
+  static bool ProbeBootstrap(std::unique_ptr<TransportChannel> channel,
+                             std::function<uint64_t()> socket_sent_bytes,
+                             HotspotConnector hotspot = {},
+                             std::function<bool()> cancelled = {});
   // Consumes completed, approved UTF-8 text batches once. Clipboard access
   // belongs to the embedding application's UI thread, not the session worker.
   std::vector<ReceivedText> TakeReceivedTexts();
@@ -80,6 +95,24 @@ class QuickShareService {
   bool StopReceivingIfIdle();
   void RefreshDiscovery();
   bool Send(const Peer& peer, std::vector<base::FilePath> paths);
+  // UI-selected BLE peer. The UI bridge owns the Bluetooth socket; the worker
+  // owns its channel and runs preflight, handshake, upgrade and normal Send.
+  // finished runs on the session worker after network cleanup and busy release;
+  // it must not access UI objects directly. Only called for an accepted request.
+  bool SendBluetooth(const Peer& peer, std::vector<base::FilePath> paths,
+                     std::unique_ptr<TransportChannel> channel,
+                     std::function<uint64_t()> socket_sent_bytes,
+                     HotspotConnector hotspot, std::function<bool()> cancelled,
+                     std::function<void()> finished = {});
+  // UI-owned Bluetooth listener supplies an already accepted socket bridge.
+  // Admission is atomic with LAN/outgoing sessions; confirmation is still
+  // required before file creation. Larger batches require a hotspot connector.
+  bool ReceiveBluetooth(std::unique_ptr<TransportChannel> channel,
+                        std::function<uint64_t()> socket_sent_bytes,
+                        std::function<bool()> cancelled,
+                        std::function<void()> finished, HotspotConnector hotspot = {});
+  // Share the LAN identity with the Bluetooth receiver advertisement.
+  Peer LocalPeer() const;
   void Confirm(bool accept);
   // Ignore stale UI decisions from a different transfer.
   void Confirm(uint64_t session, bool accept);

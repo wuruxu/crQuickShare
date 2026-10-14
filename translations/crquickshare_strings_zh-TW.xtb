@@ -51,4 +51,7 @@
 <translation id="1431933172646212969">資料夾會保留目錄結構，空資料夾將略過。每次最多傳輸 1024 個檔案，包含資料夾內的檔案。 接收端可能採用不同的目錄處理方式。</translation>
 <translation id="4532845899244822526">選擇資料夾</translation>
 <translation id="9186448452346591728">已選取 <ph name="COUNT"/> 個項目</translation>
+  <translation id="5125731858634756748">正在恢復網路連線…</translation>
+  <translation id="3851611281675392532">網路清理未完成。請檢查 Wi-Fi 連線。</translation>
+  <translation id="6873287799323878567">Wi-Fi 無法使用。請選擇較少或較小的檔案，透過藍牙傳送。</translation>
 </translationbundle>

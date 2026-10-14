@@ -51,4 +51,7 @@
 <translation id="1431933172646212969">文件夹保留目录结构，空文件夹将跳过。每次最多传输 1024 个文件，包括文件夹内的文件。 接收端可能采用不同的目录处理方式。</translation>
 <translation id="4532845899244822526">选择文件夹</translation>
 <translation id="9186448452346591728">已选择 <ph name="COUNT"/> 个项目</translation>
+  <translation id="5125731858634756748">正在恢复网络连接…</translation>
+  <translation id="3851611281675392532">网络清理未完成。请检查 Wi-Fi 连接。</translation>
+  <translation id="6873287799323878567">Wi-Fi 不可用。请选择更少或更小的文件，通过蓝牙发送。</translation>
 </translationbundle>
