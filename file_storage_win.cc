@@ -7,6 +7,7 @@
 #include <set>
 #include <tuple>
 #include <utility>
+#include "base/compiler_specific.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/rand_util.h"
@@ -131,7 +132,7 @@ bool WinReceiveBatch::Initialize(const base::FilePath& destination, int64_t tota
     return FailStorage(error, "Receive directory is unavailable or contains reparse points");
   const auto free = base::SysInfo::AmountOfFreeDiskSpace(destination_);
   if (!free || *free < total + 1024 * 1024) { error.no_space = true; return FailStorage(error, "Not enough disk space"); }
-  if (!staging_.CreateUniqueTempDirUnderPath(destination_, ".incoming-")) return FailStorage(error, "Unable to create staging directory");
+  if (!staging_.CreateUniqueTempDirUnderPath(destination_, FILE_PATH_LITERAL(".incoming-"))) return FailStorage(error, "Unable to create staging directory");
   root_ = OpenDirectory(staging_.GetPath(), true);
   if (!root_.is_valid()) return FailStorage(error, "Unable to open staging directory");
   std::set<std::tuple<DWORD, DWORD, DWORD>> identities;
@@ -178,7 +179,9 @@ bool WinReceiveBatch::Commit(StorageError& error) {
   // Rename the retained staging handle atomically; never overwrite a target.
   const auto name_bytes = base::as_byte_span(final.value());
   std::vector<uint8_t> data(sizeof(FILE_RENAME_INFO) + name_bytes.size());
-  auto* info = reinterpret_cast<FILE_RENAME_INFO*>(data.data());
+  // SAFETY: data owns the complete structure plus the variable-length filename.
+  // It is not resized before SetFileInformationByHandle consumes the buffer.
+  auto* info = UNSAFE_BUFFERS(reinterpret_cast<FILE_RENAME_INFO*>(data.data()));
   info->ReplaceIfExists = FALSE; info->RootDirectory = nullptr;
   info->FileNameLength = static_cast<DWORD>(name_bytes.size());
   base::span(data).subspan(offsetof(FILE_RENAME_INFO, FileName), name_bytes.size()).copy_from(name_bytes);

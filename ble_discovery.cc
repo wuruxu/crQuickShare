@@ -21,6 +21,7 @@
 #include "base/strings/string_view_util.h"
 #include "base/strings/string_util.h"
 #include "base/time/time.h"
+#include "build/build_config.h"
 #include "crQuickShare/lan_discovery.h"
 #include "crypto/hash.h"
 #include "device/bluetooth/bluetooth_adapter.h"
@@ -915,7 +916,9 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
       gatt_request->reading = true;
       GattStage("read_characteristic", device);
       LOG(INFO) << "crQuickShare: BLE GATT read requested; request=" << token
-                << "; address=" << gatt_request->address << "; slot=" << slot;
+                << "; address=" << gatt_request->address << "; slot=" << slot
+                << "; characteristic=" << characteristics.front()->GetIdentifier()
+                << "; characteristic_uuid=" << characteristics.front()->GetUUID().canonical_value();
       characteristics.front()->ReadRemoteCharacteristic(
           base::BindOnce(&Impl::OnGattRead, weak.GetWeakPtr(), token));
       return;
@@ -1010,6 +1013,7 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
   }
   void DeviceAdded(device::BluetoothAdapter*, device::BluetoothDevice* device) override { Observe(device); }
   void DeviceChanged(device::BluetoothAdapter*, device::BluetoothDevice* device) override { Observe(device); }
+#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)
   void DeviceAdvertisementReceived(device::BluetoothAdapter*, device::BluetoothDevice* device,
                                    int16_t, const std::vector<uint8_t>& eir) override {
     // Use service data from this event, including extended advertisements.
@@ -1029,6 +1033,26 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
       fields = fields.subspan(length);
     }
   }
+#elif BUILDFLAG(IS_WIN)
+  void DeviceAdvertisementReceived(const std::string& address,
+      const std::optional<std::string>&, const std::optional<std::string>&,
+      std::optional<int8_t>, std::optional<int8_t>, std::optional<uint16_t>,
+      const device::BluetoothDevice::UUIDList&,
+      const device::BluetoothDevice::ServiceDataMap& service_data,
+      const device::BluetoothDevice::ManufacturerDataMap&) override {
+    // WinRT creates/updates the device before delivering this parsed event.
+    // Use this packet's data and mark it fresh even if bytes/RSSI are unchanged;
+    // the following DeviceAdded/DeviceChanged notification is deduplicated.
+    auto* peer = adapter ? adapter->GetDevice(address) : nullptr;
+    if (!peer) return;
+    if (const auto found = service_data.find(device::BluetoothUUID(kServiceUuid)); found != service_data.end())
+      Observe(peer, true, base::as_string_view(base::span(found->second)));
+    peer = adapter ? adapter->GetDevice(address) : nullptr;
+    if (!peer) return;
+    if (const auto found = service_data.find(device::BluetoothUUID(kDctServiceUuid)); found != service_data.end())
+      ObserveDct(peer, base::as_string_view(base::span(found->second)), true);
+  }
+#endif
   void DeviceRemoved(device::BluetoothAdapter*, device::BluetoothDevice* device) override {
     const auto address = device->GetAddress(); records.erase(address); dct_records.erase(address); gatt_entries.erase(address); observations.erase(address); observations.erase("dct:" + address);
     if (gatt_request && gatt_request->address == address) FinishGatt("device_removed", false);

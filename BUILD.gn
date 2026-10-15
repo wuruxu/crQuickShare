@@ -141,8 +141,8 @@ source_set("ble") {
     sources += [ "hotspot_upgrade_linux.cc", "wifi_direct_go_linux.cc" ]
   }
   if (is_win) {
-    sources += [ "bluetooth_peripheral_win.cc", "bluetooth_peripheral_win.h" ]
-    libs = [ "runtimeobject.lib" ]
+    sources += [ "bluetooth_peripheral_win.cc", "bluetooth_peripheral_win.h", "hotspot_upgrade_win.cc" ]
+    libs = [ "runtimeobject.lib", "iphlpapi.lib" ]
   }
   if (enable_libcr_shared) {
     deps = [ "//libcr:engine" ]

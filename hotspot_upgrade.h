@@ -32,5 +32,9 @@ using HotspotConnector = std::function<HotspotUpgradeResult(
 // Empty interface selects the sole Linux wireless interface, never an
 // arbitrary radio when multiple interfaces exist. No network changes here.
 HotspotConnector MakeLinuxHotspotConnector(const std::string& interface);
+// Windows worker-only Native Wi-Fi client. Empty selects the sole Wi-Fi radio;
+// an explicit interface is a Windows interface alias (for example "Wi-Fi").
+// Factory creation does not query or change networking.
+HotspotConnector MakeWindowsHotspotConnector(const std::string& requested_interface);
 }  // namespace crquickshare
 #endif

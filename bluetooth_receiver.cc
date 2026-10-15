@@ -249,7 +249,7 @@ struct BluetoothReceiver::Impl : device::BluetoothAdapter::Observer,
       if (!self) return;
       self->advertising_pending = false;
       if (!success) { self->Failed("advertisement"); return; }
-      LOG(INFO) << "crQuickShare: Bluetooth receiver advertising; transport=BLUETOOTH; lan_client=1; hotspot_client=0";
+      LOG(INFO) << "crQuickShare: Bluetooth receiver advertising; transport=BLUETOOTH; lan_client=1; hotspot_client=" << bool(self->hotspot);
       if (!self->Visible()) self->Withdraw();
     }, operations.GetWeakPtr()));
 #else

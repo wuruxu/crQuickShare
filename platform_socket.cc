@@ -118,16 +118,22 @@ std::optional<std::vector<Interface>> Interfaces() {
 #if BUILDFLAG(IS_WIN)
   ULONG size = 16384;
   std::vector<uint8_t> buffer;
+  IP_ADAPTER_ADDRESSES* adapters = nullptr;
   ULONG status = ERROR_BUFFER_OVERFLOW;
   for (int attempt = 0; attempt < 3 && status == ERROR_BUFFER_OVERFLOW; ++attempt) {
-    if (size > 1024 * 1024) return std::nullopt;
+    if (size < sizeof(IP_ADAPTER_ADDRESSES) || size > 1024 * 1024) return std::nullopt;
     buffer.resize(size);
+    // SAFETY: The API takes a byte-sized allocation through a structure pointer.
+    // buffer owns at least size bytes, which is passed as the writable capacity.
+    // Refresh the pointer after each resize; after success the allocation stays
+    // alive and unchanged while traversing the API-provided linked records.
+    adapters = UNSAFE_BUFFERS(reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()));
     status = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
-        nullptr, reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()), &size);
+        nullptr, adapters, &size);
   }
   if (status == ERROR_NO_DATA) return result;
   if (status != NO_ERROR) return std::nullopt;
-  for (auto* adapter = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()); adapter; adapter = adapter->Next) {
+  for (auto* adapter = adapters; adapter; adapter = adapter->Next) {
     if (adapter->OperStatus != IfOperStatusUp || adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK || (adapter->Flags & IP_ADAPTER_NO_MULTICAST)) continue;
     for (auto* entry = adapter->FirstUnicastAddress; entry; entry = entry->Next) {
       if (!entry->Address.lpSockaddr || entry->Address.lpSockaddr->sa_family != AF_INET || entry->OnLinkPrefixLength > 32) continue;

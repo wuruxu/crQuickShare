@@ -33,7 +33,7 @@ and Wi-Fi upgrade modules for crFiles.
 | --- | --- |
 | Standalone crQuickShare | LAN file sending/receiving, BLE discovery and Fast Initiation assistance, native confirmation and progress UI |
 | crFiles on Linux | LAN and Bluetooth sharing, hotspot upgrades, optional Wi-Fi Direct client/GO, text and link reception to the clipboard |
-| crFiles on Windows | LAN and Bluetooth sharing, BLE/GATT discovery, Fast Initiation, Bluetooth-to-LAN upgrades; hardware validation remains pending |
+| crFiles on Windows | LAN and Bluetooth sharing, BLE/GATT discovery, Fast Initiation, Bluetooth-to-LAN and phone-hotspot upgrades; hardware validation remains pending |
 | Shared protocol core | Framing, authentication, transfer state, cancellation, acknowledgements, and file validation with native Linux/Windows/macOS backends |
 
 Implementation coverage is not a compatibility certification. Android behavior
@@ -113,6 +113,46 @@ session's temporary profile.
 Hotspot first in the candidate list. It does not force the phone's choice or
 create a local hotspot. Automatic hotspot selection requires a sole wireless
 interface.
+
+### Windows hotspot client
+
+crFiles uses Native Wi-Fi to join the phone's WPA2-Personal/AES hotspot.
+The shared coordinator advertises LAN and Hotspot client capabilities; Wi-Fi
+Direct client/GO is not enabled on Windows. Existing Bluetooth small transfers
+and LAN transfers use the same paths as before.
+
+With one Wi-Fi radio, selection is automatic. With multiple radios, specify the
+Windows interface alias (including localized aliases) explicitly:
+
+```powershell
+.\crFiles.exe --quick-share-upgrade-interface="Wi-Fi"
+```
+
+`--quick-share-prefer-hotspot` also applies on Windows. Selection and WLAN calls
+run on the transfer worker. The join uses a uniquely named in-memory temporary
+profile passed to `WlanConnect`; it does not call `WlanSetProfile`, save passwords
+to the profile store, or run shell commands. SSID bytes are encoded as hex and
+password XML is escaped. Credentials never appear in diagnostic logs.
+
+Association, IPv4 address readiness and TCP connection share the coordinator's
+40-second budget. Polling services Bluetooth control/cancellation every 50 ms
+between native calls. Native WLAN RPC calls themselves have OS-controlled
+latency. TCP is bound to the selected interface and a directly attached IPv4
+address. Joining can replace that adapter's existing Wi-Fi connection; Windows
+manages DHCP routes and DNS normally (unlike Linux's `never-default` profile).
+
+Cleanup cancels a pending join or disconnects the session's temporary network,
+then reconnects the previous saved profile within the shared cleanup budget.
+A newer network selection observed through WLAN notifications is preserved.
+An existing connection without a restorable saved profile, an interface already
+connecting, or an ambiguous adapter selection causes the upgrade to fail before
+changing networking. Cleanup failures remain visible through the common warning.
+
+Native Wi-Fi service/driver availability and Windows Wi-Fi/location permissions
+can deny the operation; numeric API errors and association reason codes are
+logged. This backend still requires Windows hardware validation: phone-to-PC
+and PC-to-phone transfers, repeat sessions, join cancellation, missing hotspots,
+user network switches, multiple radios, and restoration after failures.
 
 ### Linux Wi-Fi Direct (experimental)
 
