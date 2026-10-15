@@ -704,3 +704,192 @@ lan_channel_ready, encrypted_round_trip=1 and delivery_confirmed=1 and compare
 file hashes. Also exercise cancellation during connect/upgrade, rejection,
 Bluetooth off/on, app exit, and consecutive transfers. A different subnet must
 fail the LAN upgrade without changing the Windows Wi-Fi connection.
+
+## Linux Wi-Fi Direct GO and client (experimental)
+
+crFiles supports local WIFI_DIRECT GO offers and credential-based Direct clients
+using the downstream NetworkManager API. The client requires
+`network-manager-go` package `1.58.1-1+crquickshare2` or later, its wpa_supplicant
+backend, and a radio supporting concurrent STA + P2P Client/GO. NM owns the
+independent interface, DHCP, addresses and teardown. No helper process is used.
+
+On Linux, Settings → Quick Share → Advanced provides an Enable Wi-Fi Direct
+checkbox and a Wi-Fi Direct adapter selector. The empty/default selection is
+Automatic: select the first available NM-managed Wi-Fi adapter with a free P2P
+device, in interface-name order. Explicit selections never fall back to another
+adapter. Missing adapters remain visible as unavailable. Refresh updates the
+adapter list; activation always rechecks the state on its worker.
+
+To preserve existing connections, the current policy excludes AP, mesh and IBSS
+modes, even on hardware that might support additional concurrent combinations.
+AP + P2P is not inferred from STA + P2P support. This is a conservative mode
+precheck, not a full nl80211 interface-combination solver. Existing LAN transfers
+are unaffected. Direct remains opt-in and requires the downstream NM package.
+
+The settings are persisted. `--quick-share-upgrade-interface` overrides the saved
+adapter (an empty value selects Automatic); `--quick-share-direct-go` enables both
+roles for this run. Overridden settings are indicated and disabled in the UI,
+without replacing the saved preferences. The optional preference switch remains
+a command-line diagnostic option.
+
+For an outgoing Bluetooth-bootstrap comparison without the initial LAN upgrade
+request, disable Enable Wi-Fi Direct in Settings and run:
+
+```sh
+out/debian/crFiles --quick-share-upgrade-interface=wlp3s0 --quick-share-prefer-hotspot
+```
+
+`--quick-share-prefer-hotspot` requests WIFI_HOTSPOT first and waits up to 15
+seconds for the phone's path. It does not create a local hotspot or force the
+phone to provide one. Direct opt-in (from settings or command line) takes
+precedence and disables this preference. The selected interface is also used by
+the hotspot client, which may replace its current Wi-Fi connection while joining
+the phone's hotspot. Automatic hotspot selection requires a sole wireless
+interface. Existing LAN connections and small Bluetooth-only batches are
+unaffected: test with a BLE-only peer and a file larger than 73,728 bytes.
+Check `prefer_hotspot=1; hotspot_client=1; direct_client=0` in the transfer
+diagnostics and `Upgrade request diagnostics; ... media=3` for the first
+upgrade request. `stage=hotspot_join` means a peer path was received; a timeout
+with `path_received=0` occurred before local Wi-Fi association was attempted.
+
+Upgrade diagnostics log the initial `Connection request capabilities`,
+`Upgrade role diagnostics` (presence and value separately), `Upgrade request
+diagnostics`, and `Upgrade request socket completed` (observed local completion,
+not a peer receipt). Media values are Bluetooth=2, Hotspot=3, LAN=5, Direct=8.
+`Upgrade negotiation received` records peer event and path field presence before
+validation; `Upgrade path decision` distinguishes accepted, duplicate, disabled
+backend, session-state, unsupported-medium, and invalid-field cases. Incoming
+path requests schedule a local Direct GO only when the requested media and peer
+client role match an available backend; otherwise they receive UPGRADE_FAILURE
+before migration is committed. Late requests after a drain marker are ignored.
+These diagnostics
+exclude SSIDs, passwords, endpoint identities, keys, and raw serialized frames.
+
+The request layout matches Nearby's `offline_frames.cc::ForBwuPathRequest`:
+UPGRADE_PATH_REQUEST → upgrade_path_info → upgrade_path_request → mediums and
+medium_meta_data.medium_role. The bundled C++ BWU manager emits this request
+under dynamic-role-switch conditions, but its incoming-event switch does not
+handle UPGRADE_PATH_REQUEST. This is not evidence of the Android implementation's
+behavior; a silent phone still requires phone-side diagnostics to determine why
+it did not provide a hotspot path.
+
+Upgrade coordination follows the Nearby separation between offering a network
+and joining a peer's network. By default an outgoing bootstrap session first
+waits up to five seconds for a peer path (`upgrade_wait_peer_path`). An already
+queued valid offer is used immediately. Explicit Hotspot/Direct preferences skip
+this initial wait. When no offer arrives, UPGRADE_PATH_REQUEST remains a bounded
+compatibility fallback, not an assumption that every peer implements it.
+
+An incoming bootstrap session can offer a local Direct GO when the peer declares
+Direct client support (or the existing explicit Direct preference is enabled).
+A peer role-switch request can also select this host role for an outgoing
+session. A queued peer offer takes precedence over a queued host-role request;
+requests arriving during migration are rejected rather than starting a second
+network. Local GO creation is attempted at most once per negotiation. No local
+Hotspot host or LAN upgrade listener is implemented or claimed by this change.
+
+Before either side sends LAST_WRITE_TO_PRIOR_CHANNEL, a failed join sends
+UPGRADE_FAILURE, waits for local Bluetooth write completion, and explicitly
+restores/releases its network before retrying. Heartbeats and peer control
+messages continue during recovery. New offers may arrive during cleanup or the
+5/10-second retry waits. There are at most three attempts under a 120-second
+negotiation budget; individual joins retain their shorter timeouts. Cleanup
+failure, cancellation, broken Bluetooth, or either drain marker prevents retry.
+There is no large-file fallback to streaming on Bluetooth. Diagnostic stages are
+`upgrade_network_recovery` and `upgrade_retry_wait`. This recovery cannot make a
+phone hotspot visible when the phone or radio does not broadcast/discover it.
+
+Alternatively, enable both roles with an explicit interface:
+
+```sh
+out/debian/crFiles --quick-share-upgrade-interface=wlp3s0 \
+  --quick-share-direct-go --quick-share-prefer-direct-go
+```
+
+For outgoing files, crFiles follows a valid phone-provided LAN or Direct path.
+It advertises the Direct client role and does not create a competing local GO.
+Without the preference switch it requests LAN first, then a phone Direct path;
+with the switch it requests Direct first when no usable phone path is pending.
+The switch still prefers a local GO for incoming files when no phone path is
+pending. A pending usable phone path takes precedence in either direction.
+Small outgoing batches remain on Bluetooth.
+
+The client waits for phone acceptance before activating a volatile, user-restricted
+`wifi-p2p.client` profile with SSID, PSK and optional frequency. A private D-Bus
+connection binds the activation lifetime to the session. IPv4 DHCP must succeed;
+phone-provided default routes, extra routes and DNS are not adopted. The TCP
+connection is bound to the new interface and its directly attached IPv4 address.
+The station's active connection is checked during setup. An occupied P2P device
+is rejected without taking over an unrelated group. IPv6-only Direct paths are
+not supported by this client backend.
+
+After TCP connects, the client sends CLIENT_INTRODUCTION and waits for its ACK
+when advertised and drains Bluetooth through both barriers. The Direct client
+echoes the encryption mode from the authenticated phone upgrade path: when
+supports_disabling_encryption is true, the replacement channel uses plaintext
+Nearby records over the WPA-protected Direct link; otherwise it retains UKEY2.
+It verifies the replacement channel with a matching heartbeat ACK. Repeated
+identical path offers during joining do not restart or reject the active join.
+File bytes are sent only after channel verification. Failure/cancellation closes
+the data channel and releases the NM activation through normal session cleanup.
+GO opt-in continues to disable the station-replacing hotspot backend.
+
+This client integration has been source-reviewed only: Chromium was not built
+and no phone transfer was run for this change. NM interface creation/cancellation
+validation is recorded in `../network-manager-go/contrib/crquickshare/VALIDATION.md`.
+Manual validation should cover outgoing Direct and LAN, phone rejection, cancel
+during NM association/DHCP, small Bluetooth batches, and incoming GO regression.
+Expected outgoing Direct logs: `direct_client_join`, `Direct client NM state`,
+`Direct client ready`, `Direct client TCP connect`, `direct_channel_ready`,
+`channel_round_trip=1`, `delivery_confirmed=1`, then client network cleanup.
+For a phone path requesting plaintext, expect `negotiated_plaintext=1` and
+`encrypted_round_trip=0`; this is not a verification failure.
+Verify file hashes and confirm that the original station and default route remain
+unchanged and that the temporary P2P interface/profile disappears after cleanup.
+
+The old `--quick-share-direct-go-helper` switch is replaced by
+`--quick-share-direct-go`. The backend does not invoke the legacy Python helper,
+pkexec, nmcli, or a second supplicant. Run the application as the desktop user;
+NM applies its normal connection/Polkit authorization. No new passwordless policy
+is installed. Setup and peer association share the existing 40-second deadline.
+
+The GO backend locates NM's `p2p-dev-<station>` device of type 30 and rejects an
+already active P2P connection. It creates a `wifi-p2p` profile with
+`autonomous=true`, `frequency=0`, `ipv4.method=shared`, `ipv6.method=link-local`,
+and never-default addressing. NM chooses the station's current frequency when
+associated. The profile ACL is restricted to the application user, and
+AddAndActivateConnection2 uses `persist=volatile` and
+`bind-activation=dbus-client` on a private, long-lived D-Bus connection. The NM
+unique bus name is pinned so a daemon restart cannot redirect cleanup to reused
+object paths. D-Bus waits continue servicing the Bluetooth channel.
+
+After activation, GetGroupCredentials supplies SSID/passphrase/frequency and
+the group interface. IpInterface and Ip4Config.AddressData supply the actual
+address and subnet, checked against the local interface. The TCP listener binds
+only that group address on an ephemeral port; a usable IPv6 link-local listener
+is optionally advertised on the same port. No fixed subnet is assumed. NM owns
+DHCP and interface teardown. Its shared IPv4 mode also manages forwarding/NAT
+and firewall rules; it is not the legacy helper's DHCP-only network.
+
+The existing upgrade protocol publishes credentials over the encrypted Bluetooth
+channel, checks CLIENT_INTRODUCTION endpoint identity, retains UKEY2 encryption,
+performs both old-channel barriers, and verifies an encrypted heartbeat before
+accepting file data. Credentials and D-Bus error bodies are not logged.
+
+On completion/cancellation the backend closes listeners and deactivates only
+its own active connection. Cleanup success requires removal of the active
+connection, the captured group interface, and the volatile profile. Closing the
+private D-Bus connection also releases the NM activation lease, including when
+an activation reply was lost. A cleanup timeout logs failure rather than claiming
+teardown completed. The station is never explicitly deactivated or restored.
+Its active connection is checked during setup and while waiting for the peer;
+radio/driver side effects still require hardware validation.
+
+Manual acceptance: send a >72 KiB file from Android and check `direct_go_create`,
+`Direct GO ready; backend=NetworkManager`, `direct_go_accept`,
+`direct_channel_ready`, `medium=WIFI_DIRECT`, `encrypted_round_trip=1`,
+`delivery_confirmed=1`, and `Direct GO cleanup ... success=1`. Compare file hashes
+and check the station address/default route. Repeat for cancellation, denied
+permissions, peer rejection, application exit and a second transfer. Confirm no
+GO interface, shared DHCP process or temporary profile remains. No Chromium
+compilation or unit tests were run for this integration.

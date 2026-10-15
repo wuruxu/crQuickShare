@@ -82,6 +82,7 @@ source_set("protocol") {
     "file_storage.cc",
     "file_storage.h",
     "hotspot_upgrade.h",
+    "wifi_direct_go.h",
     "lan_discovery.cc",
     "lan_discovery.h",
     "lan_discovery_mdns.cc",
@@ -137,7 +138,7 @@ source_set("ble") {
   sources = [ "ble_wakeup.cc", "ble_wakeup.h", "ble_discovery.cc", "ble_discovery.h", "bootstrap_probe.cc", "bootstrap_probe.h", "bluetooth_receiver.cc", "bluetooth_receiver.h" ]
   if (is_linux) {
     configs += [ "//build/config/linux/dbus" ]
-    sources += [ "hotspot_upgrade_linux.cc" ]
+    sources += [ "hotspot_upgrade_linux.cc", "wifi_direct_go_linux.cc" ]
   }
   if (is_win) {
     sources += [ "bluetooth_peripheral_win.cc", "bluetooth_peripheral_win.h" ]

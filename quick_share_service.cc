@@ -46,6 +46,32 @@ nc::OfflineFrame Frame(nc::V1Frame::FrameType type) {
 qs::Frame Sharing(qs::V1Frame::FrameType type) {
   qs::Frame f; f.set_version(qs::Frame::V1); f.mutable_v1()->set_type(type); return f;
 }
+// Log only protocol capabilities, never endpoint identities or credentials.
+template <typename Media>
+std::string UpgradeMedia(const Media& media) {
+  std::string result;
+  for (auto medium : media) {
+    if (!result.empty()) result += ",";
+    result += base::NumberToString(static_cast<int>(medium));
+    if (result.size() > 256) { result += ",..."; break; }
+  }
+  return result;
+}
+void LogUpgradeRoles(uint64_t session, const char* source, bool has_metadata,
+                     const nc::MediumMetadata& metadata) {
+  const auto& role = metadata.medium_role();
+  LOG(INFO) << "crQuickShare: Upgrade role diagnostics; session=" << session
+            << "; source=" << source << "; has_metadata=" << has_metadata
+            << "; has_role=" << metadata.has_medium_role()
+            << "; has_hotspot_host=" << role.has_support_wifi_hotspot_host()
+            << "; hotspot_host=" << role.support_wifi_hotspot_host()
+            << "; has_hotspot_client=" << role.has_support_wifi_hotspot_client()
+            << "; hotspot_client=" << role.support_wifi_hotspot_client()
+            << "; has_direct_go=" << role.has_support_wifi_direct_group_owner()
+            << "; direct_go=" << role.support_wifi_direct_group_owner()
+            << "; has_direct_client=" << role.has_support_wifi_direct_group_client()
+            << "; direct_client=" << role.support_wifi_direct_group_client();
+}
 std::string Code(const std::string& token) {
   int hash = 0, multiplier = 1;
   for (unsigned char c : token) { hash = (hash + static_cast<int8_t>(c) * multiplier) % 9973; multiplier = (multiplier * 31) % 9973; }
@@ -80,6 +106,10 @@ struct QuickShareService::Impl {
     bool incoming = false;
   };
   std::optional<Request> request;
+  WifiDirectGoFactory direct_go_factory;
+  WifiDirectClientConnector direct_client_connector;
+  bool prefer_direct_go = false;
+  bool prefer_hotspot_upgrade = false;
   const bool receive_text;
   std::vector<QuickShareService::ReceivedText> received_texts;
   base::TimeTicks visible_until;
@@ -100,6 +130,9 @@ struct QuickShareService::Impl {
     Update([&](Snapshot& s) {
       s.phase = phase;
       if (phase == Phase::kTransferring) {
+        // Retire the display code atomically with transfer start. UI polling
+        // can skip this phase for small files and next observe kWaiting.
+        s.code.clear();
         progress_samples.clear();
         progress_samples.emplace_back(base::TimeTicks::Now(), s.transferred);
       }
@@ -147,12 +180,22 @@ struct QuickShareService::Impl::Session {
   bool lan_upgrade_enabled = false, lan_upgrade_attempted = false;
   std::function<uint64_t()> bootstrap_sent_bytes;
   std::string local_endpoint;
+  std::string remote_endpoint;
+  WifiDirectGoFactory direct_go;
+  WifiDirectClientConnector direct_client;
+  bool direct_go_preferred = false;
+  bool hotspot_preferred = false;
+  bool peer_direct_client_supported = false;
+  bool peer_requested_direct_go = false;
+  bool local_go_attempted = false;
+  base::TimeTicks upgrade_negotiation_deadline;
   bool upgrade_path_received = false, upgrade_path_rejected = false;
   nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo::Medium requested_upgrade_medium =
       nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo::UNKNOWN_MEDIUM;
   HotspotConnector hotspot_connector;
   std::function<bool()> externally_cancelled;
   std::optional<nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo> upgrade_path;
+  std::optional<nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo> joining_peer_path;
   std::unique_ptr<UpgradeNetwork> upgrade_network;
   bool upgrade_in_progress = false, upgrade_completed = false;
   // Selected from the encrypted upgrade path and applied only after migration.
@@ -228,6 +271,10 @@ struct QuickShareService::Impl::Session {
     static std::atomic<uint64_t> next_session{0};
     diagnostic_session = ++next_session;
     std::lock_guard guard(owner.mutex); local_endpoint = owner.endpoint;
+    direct_go = owner.direct_go_factory;
+    direct_client = owner.direct_client_connector;
+    direct_go_preferred = owner.prefer_direct_go;
+    hotspot_preferred = owner.prefer_hotspot_upgrade;
   }
   ~Session() {
     LOG(INFO) << "crQuickShare: Certificate diagnostics summary; outgoing=" << outgoing
@@ -642,6 +689,8 @@ struct QuickShareService::Impl::Session {
             nc::BandwidthUpgradeRetryFrame::BLUETOOTH : nc::BandwidthUpgradeRetryFrame::WIFI_LAN);
         if (lan_upgrade_enabled && !upgrade_completed) reply->add_supported_medium(nc::BandwidthUpgradeRetryFrame::WIFI_LAN);
         if (hotspot_connector) reply->add_supported_medium(nc::BandwidthUpgradeRetryFrame::WIFI_HOTSPOT);
+        if (bootstrap_probe && (direct_client || direct_go) && !upgrade_completed)
+          reply->add_supported_medium(nc::BandwidthUpgradeRetryFrame::WIFI_DIRECT);
         if (!Write(response)) return -1;
       }
       if (upgrade_retry_count == 1)
@@ -655,6 +704,48 @@ struct QuickShareService::Impl::Session {
         if (++upgrade_events > 32) { Fail("Too many bootstrap upgrade events"); return -1; }
         const auto& upgrade = v.bandwidth_upgrade_negotiation();
         const auto& path = upgrade.upgrade_path_info();
+        LOG(INFO) << "crQuickShare: Upgrade negotiation received; session=" << diagnostic_session
+                  << "; has_event=" << upgrade.has_event_type() << "; event=" << static_cast<int>(upgrade.event_type())
+                  << "; has_path=" << upgrade.has_upgrade_path_info() << "; has_medium=" << path.has_medium()
+                  << "; medium=" << static_cast<int>(path.medium()) << "; requested_medium=" << static_cast<int>(requested_upgrade_medium)
+                  << "; hotspot_credentials=" << path.has_wifi_hotspot_credentials()
+                  << "; direct_credentials=" << path.has_wifi_direct_credentials() << "; lan_socket=" << path.has_wifi_lan_socket()
+                  << "; has_request=" << path.has_upgrade_path_request();
+        if (upgrade.event_type() == nc::BandwidthUpgradeNegotiationFrame::UPGRADE_PATH_REQUEST) {
+          const auto& path_request = path.upgrade_path_request();
+          if (!path.has_upgrade_path_request() || path_request.mediums_size() == 0 ||
+              path_request.mediums_size() > 32) {
+            Fail("Invalid upgrade path request"); return -1;
+          }
+          if (upgrade_local_last || upgrade_peer_last || upgrade_completed) {
+            LOG(INFO) << "crQuickShare: Peer upgrade request; session=" << diagnostic_session
+                      << "; action=ignored; reason=channel_migration_committed";
+            return 0;
+          }
+          using Path = nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo;
+          const bool requests_direct = std::find(path_request.mediums().begin(),
+              path_request.mediums().end(), Path::WIFI_DIRECT) != path_request.mediums().end();
+          const bool can_offer = direct_go && requests_direct &&
+              path_request.medium_meta_data().medium_role().support_wifi_direct_group_client() &&
+              (outgoing || !accepted) && !local_go_attempted &&
+              !upgrade_in_progress && !upgrade_completed && !upgrade_path &&
+              !upgrade_local_last && !upgrade_peer_last;
+          LOG(INFO) << "crQuickShare: Peer upgrade request; session=" << diagnostic_session
+                    << "; media=" << UpgradeMedia(path_request.mediums())
+                    << "; action=" << (can_offer ? "schedule_direct_go" : "reject")
+                    << "; reason=" << (can_offer ? "compatible_roles" : "no_available_host_role");
+          LogUpgradeRoles(diagnostic_session, "peer_upgrade_request", path_request.has_medium_meta_data(), path_request.medium_meta_data());
+          if (can_offer) {
+            peer_requested_direct_go = true;
+          } else {
+            auto response = Frame(nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION);
+            auto* body = response.mutable_v1()->mutable_bandwidth_upgrade_negotiation();
+            body->set_event_type(nc::BandwidthUpgradeNegotiationFrame::UPGRADE_FAILURE);
+            body->mutable_upgrade_path_info()->set_medium(path_request.mediums(0));
+            if (!Write(response)) return -1;
+          }
+          return 0;
+        }
         if (upgrade.event_type() == nc::BandwidthUpgradeNegotiationFrame::UPGRADE_PATH_AVAILABLE ||
             upgrade.event_type() == nc::BandwidthUpgradeNegotiationFrame::UPGRADE_FAILURE) {
           if (!upgrade.has_upgrade_path_info() || !path.has_medium()) {
@@ -662,8 +753,12 @@ struct QuickShareService::Impl::Session {
           }
           upgrade_path_received |= upgrade.event_type() == nc::BandwidthUpgradeNegotiationFrame::UPGRADE_PATH_AVAILABLE;
           // A late rejection of the LAN request must not reject hotspot fallback.
-          if (upgrade.event_type() == nc::BandwidthUpgradeNegotiationFrame::UPGRADE_FAILURE &&
-              path.medium() == requested_upgrade_medium) upgrade_path_rejected = true;
+          if (upgrade.event_type() == nc::BandwidthUpgradeNegotiationFrame::UPGRADE_FAILURE) {
+            if (path.medium() == requested_upgrade_medium) upgrade_path_rejected = true;
+            // Do not join a proposal withdrawn before the coordinator starts it.
+            if (!upgrade_in_progress && upgrade_path && upgrade_path->medium() == path.medium())
+              upgrade_path.reset();
+          }
         }
         if (upgrade.event_type() == nc::BandwidthUpgradeNegotiationFrame::LAST_WRITE_TO_PRIOR_CHANNEL) {
           if (!upgrade_in_progress) { Fail("Unexpected upgrade last-write"); return -1; }
@@ -691,19 +786,47 @@ struct QuickShareService::Impl::Session {
       }
       if (v.bandwidth_upgrade_negotiation().event_type() == nc::BandwidthUpgradeNegotiationFrame::UPGRADE_PATH_AVAILABLE) {
         const auto& path = v.bandwidth_upgrade_negotiation().upgrade_path_info();
+        if (upgrade_local_last || upgrade_peer_last || upgrade_completed) {
+          LOG(INFO) << "crQuickShare: Upgrade path decision; session=" << diagnostic_session
+                    << "; action=ignored; reason=channel_migration_committed";
+          return 0;
+        }
+        // Retransmitting the same proposal while NM joins is not a new upgrade.
+        if ((joining_peer_path && upgrade_in_progress &&
+             joining_peer_path->SerializeAsString() == path.SerializeAsString()) ||
+            (upgrade_path && upgrade_path->SerializeAsString() == path.SerializeAsString())) {
+          LOG(INFO) << "crQuickShare: Upgrade path decision; session=" << diagnostic_session
+                    << "; medium=" << static_cast<int>(path.medium()) << "; action=ignored; reason=duplicate_path";
+          return 0;
+        }
         if (bootstrap_probe && (outgoing || !accepted) &&
             !upgrade_in_progress && !upgrade_completed && !upgrade_path &&
             ((hotspot_connector && path.medium() == nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo::WIFI_HOTSPOT &&
-              path.has_wifi_hotspot_credentials() && !path.has_wifi_lan_socket()) ||
+              path.has_wifi_hotspot_credentials() && !path.has_wifi_lan_socket() && !path.has_wifi_direct_credentials()) ||
              (lan_upgrade_enabled && !lan_upgrade_attempted &&
               path.medium() == nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo::WIFI_LAN &&
-              path.has_wifi_lan_socket() && !path.has_wifi_hotspot_credentials())) &&
-            !path.has_wifi_direct_credentials() &&
+              path.has_wifi_lan_socket() && !path.has_wifi_hotspot_credentials() && !path.has_wifi_direct_credentials()) ||
+             (direct_client && path.medium() == nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo::WIFI_DIRECT &&
+              path.has_wifi_direct_credentials() && !path.has_wifi_lan_socket() && !path.has_wifi_hotspot_credentials())) &&
             !path.has_bluetooth_credentials() && !path.has_wifi_aware_credentials() && !path.has_web_rtc_credentials() &&
             !path.has_awdl_credentials() && !path.has_upgrade_path_request()) {
+          LOG(INFO) << "crQuickShare: Upgrade path decision; session=" << diagnostic_session
+                    << "; medium=" << static_cast<int>(path.medium()) << "; action=accepted";
           upgrade_path = path;
           return 0;
         }
+        using Path = nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo;
+        const char* reason = !bootstrap_probe ? "not_bootstrap" :
+            !(outgoing || !accepted) ? "incoming_already_accepted" :
+            upgrade_in_progress ? "upgrade_in_progress" : upgrade_completed ? "upgrade_completed" :
+            upgrade_path ? "path_already_pending" :
+            path.medium() == Path::WIFI_HOTSPOT && !hotspot_connector ? "hotspot_client_disabled" :
+            path.medium() == Path::WIFI_DIRECT && !direct_client ? "direct_client_disabled" :
+            path.medium() == Path::WIFI_LAN && (!lan_upgrade_enabled || lan_upgrade_attempted) ? "lan_disabled_or_attempted" :
+            path.medium() != Path::WIFI_HOTSPOT && path.medium() != Path::WIFI_DIRECT && path.medium() != Path::WIFI_LAN ? "unsupported_medium" :
+            "missing_or_conflicting_path_fields";
+        LOG(INFO) << "crQuickShare: Upgrade path decision; session=" << diagnostic_session
+                  << "; medium=" << static_cast<int>(path.medium()) << "; action=rejected; reason=" << reason;
         auto response = Frame(nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION);
         if (bluetooth_direct)
           LOG(INFO) << "crQuickShare: Bluetooth direct transfer retaining channel; session="
@@ -757,14 +880,18 @@ struct QuickShareService::Impl::Session {
       r->add_mediums(std::string_view(channel->name()) == "BLUETOOTH" ?
           nc::ConnectionRequestFrame::BLUETOOTH : nc::ConnectionRequestFrame::WIFI_LAN);
       if (lan_upgrade_enabled) r->add_mediums(nc::ConnectionRequestFrame::WIFI_LAN);
-      if (hotspot_connector) {
-        r->add_mediums(nc::ConnectionRequestFrame::WIFI_HOTSPOT);
+      if (hotspot_connector) r->add_mediums(nc::ConnectionRequestFrame::WIFI_HOTSPOT);
+      if (bootstrap_probe && (direct_client || direct_go)) r->add_mediums(nc::ConnectionRequestFrame::WIFI_DIRECT);
+      if (hotspot_connector || direct_go || direct_client) {
         auto* roles = r->mutable_medium_metadata()->mutable_medium_role();
-        roles->set_support_wifi_hotspot_client(true);
+        roles->set_support_wifi_hotspot_client(bool(hotspot_connector));
         roles->set_support_wifi_hotspot_host(false);
-        roles->set_support_wifi_direct_group_client(false);
-        roles->set_support_wifi_direct_group_owner(false);
+        roles->set_support_wifi_direct_group_client(bool(direct_client));
+        roles->set_support_wifi_direct_group_owner(bootstrap_probe && bool(direct_go));
       }
+      LOG(INFO) << "crQuickShare: Connection request capabilities; session=" << diagnostic_session
+                << "; media=" << UpgradeMedia(r->mediums());
+      LogUpgradeRoles(diagnostic_session, "connection_request", r->has_medium_metadata(), r->medium_metadata());
       r->set_keep_alive_interval_millis(5000); r->set_keep_alive_timeout_millis(30000);
       if (!Write(f)) return false;
     } else {
@@ -779,10 +906,12 @@ struct QuickShareService::Impl::Session {
       }
       if (!f.ParseFromString(raw) || f.version() != nc::OfflineFrame::V1 || f.v1().type() != nc::V1Frame::CONNECTION_REQUEST || !f.v1().has_connection_request()) return Fail("Invalid connection request");
       const auto& r = f.v1().connection_request();
+      peer_direct_client_supported = r.medium_metadata().medium_role().support_wifi_direct_group_client();
       ConfigureKeepalive(r.has_keep_alive_interval_millis() ? r.keep_alive_interval_millis() : 5000,
                          r.has_keep_alive_timeout_millis() ? r.keep_alive_timeout_millis() : 30000);
       auto peer_name = EndpointName(r.has_endpoint_info() ? r.endpoint_info() : r.endpoint_name());
       if (peer_name.empty() || r.endpoint_id().size() != 4) return Fail("Invalid endpoint information");
+      remote_endpoint = r.endpoint_id();
       const auto& peer_info = r.has_endpoint_info() ? r.endpoint_info() : r.endpoint_name();
       owner.Update([&](Snapshot& s) { s.peer_name = peer_name; s.peer_device_type = (static_cast<uint8_t>(peer_info[0]) >> 1) & 7; });
     }
@@ -1125,62 +1254,156 @@ struct QuickShareService::Impl::Session {
   }
   bool RequestWifiUpgrade(const std::function<uint64_t()>& socket_sent_bytes) {
     using Path = nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo;
-    // Request LAN alone first: list ordering is not a peer preference contract.
-    // Retry only before either side has committed to draining Bluetooth.
-    for (int attempt = 0; attempt < 2 && Active(); ++attempt) {
-      const bool request_lan = lan_upgrade_enabled && !lan_upgrade_attempted;
+    // Keep negotiation bounded independently of per-medium association timeouts.
+    // The acceptor normally offers a path. PATH_REQUEST is a compatibility
+    // fallback for peers which do not initiate an upgrade themselves.
+    upgrade_negotiation_deadline = base::TimeTicks::Now() + base::Seconds(120);
+    auto wait_for_path = [&](base::TimeDelta delay) {
+      const auto until = std::min(upgrade_negotiation_deadline, base::TimeTicks::Now() + delay);
+      while (Active() && !upgrade_path && !peer_requested_direct_go &&
+             base::TimeTicks::Now() < until) {
+        nc::OfflineFrame frame;
+        const int status = Read(frame);
+        if (status < 0 || (status > 0 && !Control(frame))) return false;
+      }
+      return Active();
+    };
+    auto flush_bootstrap = [&]() {
+      if (!Flush()) return false;
+      const uint64_t end = transport_written_bytes;
+      const auto until = std::min(upgrade_negotiation_deadline, base::TimeTicks::Now() + base::Seconds(5));
+      while (Active() && socket_sent_bytes() < end && base::TimeTicks::Now() < until) {
+        nc::OfflineFrame frame;
+        const int status = Read(frame);
+        if (status < 0 || (status > 0 && !Control(frame))) return false;
+      }
+      if (!Active()) return false;
+      if (socket_sent_bytes() < end) return Fail("Bluetooth upgrade control write timed out", Failure::kConnection);
+      return true;
+    };
+    auto recover_network = [&]() {
+      // Complete the local failure write before restoring networking. Continue
+      // servicing the old encrypted channel during restoration and backoff.
+      if (!flush_bootstrap()) return false;
+      if (upgrade_network) {
+        Stage("upgrade_network_recovery");
+        // Restoration has a separate budget even when negotiation has expired.
+        const bool cleaned = upgrade_network->Cleanup(
+            base::TimeTicks::Now() + base::Seconds(12), [&] {
+              if (!Active()) return false;
+              nc::OfflineFrame frame;
+              const int status = Read(frame, 0);
+              return status >= 0 && (!status || Control(frame)) && Active();
+            });
+        owner.Update([&](Snapshot& snapshot) { snapshot.network_cleanup_failed = !cleaned; });
+        if (!cleaned) return Fail("Unable to restore network after Wi-Fi upgrade failure", Failure::kConnection);
+        upgrade_network.reset();
+      }
+      upgrade_path_rejected = false;
+      return Active();
+    };
+    if (!upgrade_path && !peer_requested_direct_go &&
+        !(direct_go && !outgoing && (peer_direct_client_supported || direct_go_preferred)) &&
+        !hotspot_preferred && !direct_go_preferred) {
+      Stage("upgrade_wait_peer_path");
+      if (!wait_for_path(base::Seconds(5))) return false;
+    }
+    // Three attempts, including unsolicited offers. Retry only while the old
+    // channel remains authoritative; never resume it after either drain marker.
+    for (int attempt = 0; attempt < 3 && Active() &&
+         base::TimeTicks::Now() < upgrade_negotiation_deadline; ++attempt) {
+      if (!upgrade_path && direct_go && !local_go_attempted &&
+          (peer_requested_direct_go || (!outgoing && (peer_direct_client_supported || direct_go_preferred)))) {
+        peer_requested_direct_go = false;
+        local_go_attempted = true;
+        upgrade_path.emplace();
+        upgrade_path->set_medium(Path::WIFI_DIRECT);
+        LOG(INFO) << "crQuickShare: Upgrade role selected; session=" << diagnostic_session
+                  << "; role=direct_group_owner; attempt=" << attempt + 1;
+      }
+      const bool request_lan = lan_upgrade_enabled && !lan_upgrade_attempted &&
+          !(outgoing && direct_go_preferred && direct_client) &&
+          !(outgoing && hotspot_preferred && hotspot_connector);
       Stage("upgrade_path_probe");
+      const bool sent_lan_request = !upgrade_path && request_lan;
       if (!upgrade_path) {
         upgrade_path_received = upgrade_path_rejected = false;
         auto upgrade_request = Frame(nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION);
         auto* negotiation = upgrade_request.mutable_v1()->mutable_bandwidth_upgrade_negotiation();
         negotiation->set_event_type(nc::BandwidthUpgradeNegotiationFrame::UPGRADE_PATH_REQUEST);
-        auto* path = negotiation->mutable_upgrade_path_info()->mutable_upgrade_path_request();
-        requested_upgrade_medium = request_lan ? Path::WIFI_LAN : hotspot_connector ? Path::WIFI_HOTSPOT : Path::BLUETOOTH;
-        path->add_mediums(requested_upgrade_medium);
-        auto* roles = path->mutable_medium_meta_data()->mutable_medium_role();
-        roles->set_support_wifi_direct_group_owner(false);
-        roles->set_support_wifi_direct_group_client(false);
+        auto* path_request = negotiation->mutable_upgrade_path_info()->mutable_upgrade_path_request();
+        requested_upgrade_medium = request_lan ? Path::WIFI_LAN : direct_client ? Path::WIFI_DIRECT :
+            hotspot_connector ? Path::WIFI_HOTSPOT : Path::UNKNOWN_MEDIUM;
+        if (requested_upgrade_medium == Path::UNKNOWN_MEDIUM) break;
+        path_request->add_mediums(requested_upgrade_medium);
+        auto* roles = path_request->mutable_medium_meta_data()->mutable_medium_role();
+        roles->set_support_wifi_direct_group_owner(bool(direct_go) && !local_go_attempted);
+        roles->set_support_wifi_direct_group_client(bool(direct_client));
         roles->set_support_wifi_hotspot_host(false);
         roles->set_support_wifi_hotspot_client(bool(hotspot_connector));
-        LOG(INFO) << "crQuickShare: Bootstrap path request; session=" << diagnostic_session
-                  << "; medium=" << (request_lan ? "WIFI_LAN" : hotspot_connector ? "WIFI_HOTSPOT" : "BLUETOOTH");
-        if (!Write(upgrade_request)) return false;
-        uint64_t request_end = transport_written_bytes;
-        for (const auto& pending : writes) request_end += pending.bytes.size() - pending.offset;
-        const auto deadline = base::TimeTicks::Now() + base::Seconds(request_lan ? 5 : hotspot_connector ? 15 : 8);
-        while (Active() && !upgrade_path && !upgrade_path_rejected && base::TimeTicks::Now() < deadline) {
+        LOG(INFO) << "crQuickShare: Upgrade request diagnostics; session=" << diagnostic_session
+                  << "; media=" << UpgradeMedia(path_request->mediums())
+                  << "; event=" << static_cast<int>(negotiation->event_type())
+                  << "; reason=compatibility_fallback; attempt=" << attempt + 1;
+        LogUpgradeRoles(diagnostic_session, "upgrade_request", path_request->has_medium_meta_data(), path_request->medium_meta_data());
+        if (!Write(upgrade_request) || !flush_bootstrap()) return false;
+        LOG(INFO) << "crQuickShare: Upgrade request socket completed; session=" << diagnostic_session
+                  << "; medium=" << static_cast<int>(requested_upgrade_medium)
+                  << "; peer_receipt_confirmed=0";
+        const auto until = std::min(upgrade_negotiation_deadline,
+            base::TimeTicks::Now() + base::Seconds(request_lan ? 5 : 15));
+        while (Active() && !upgrade_path && !peer_requested_direct_go && !upgrade_path_rejected &&
+               base::TimeTicks::Now() < until) {
           nc::OfflineFrame frame;
-          const int r = Read(frame);
-          if (r < 0 || (r > 0 && !Control(frame))) return false;
+          const int status = Read(frame);
+          if (status < 0 || (status > 0 && !Control(frame))) return false;
         }
         LOG(INFO) << "crQuickShare: Bootstrap path wait; session=" << diagnostic_session
-                  << "; socket_written=" << (socket_sent_bytes() >= request_end)
-                  << "; peer_receipt_confirmed=0"
                   << "; path_received=" << bool(upgrade_path) << "; path_rejected=" << upgrade_path_rejected
-                  << "; wait_expired=" << (base::TimeTicks::Now() >= deadline);
+                  << "; wait_expired=" << (base::TimeTicks::Now() >= until);
+        if (!upgrade_path && peer_requested_direct_go) {
+          peer_requested_direct_go = false;
+          local_go_attempted = true;
+          upgrade_path.emplace(); upgrade_path->set_medium(Path::WIFI_DIRECT);
+        }
       }
       if (!Active()) return false;
       const bool lan_path = upgrade_path ? upgrade_path->medium() == Path::WIFI_LAN : request_lan;
-      if (upgrade_path && UpgradeWifi(socket_sent_bytes)) return true;
+      if (upgrade_path) {
+        // A real peer offer wins over a queued role-switch request.
+        peer_requested_direct_go = false;
+        if (UpgradeWifi(socket_sent_bytes)) return true;
+      }
       if (!Active() || upgrade_completed || upgrade_local_last || upgrade_peer_last) return false;
-      if (!lan_path || !hotspot_connector) break;
-      lan_upgrade_attempted = true;
-      LOG(INFO) << "crQuickShare: Wi-Fi upgrade fallback; session=" << diagnostic_session
-                << "; from=WIFI_LAN; to=WIFI_HOTSPOT";
+      if (lan_path || sent_lan_request) lan_upgrade_attempted = true;
+      if (!recover_network()) return false;
+      if (attempt == 2) break;
+      Stage("upgrade_retry_wait");
+      LOG(INFO) << "crQuickShare: Upgrade retry scheduled; session=" << diagnostic_session
+                << "; completed_attempts=" << attempt + 1 << "; delay_ms=" << (attempt + 1) * 5000
+                << "; retaining=BLUETOOTH";
+      if (!wait_for_path(base::Seconds((attempt + 1) * 5))) return false;
     }
-    if (!hotspot_connector && !lan_upgrade_enabled) return false;
+    if (!hotspot_connector && !lan_upgrade_enabled && !direct_go && !direct_client) return false;
+    if (!Active()) return false;
+    timed_out = base::TimeTicks::Now() >= upgrade_negotiation_deadline;
+    LOG(WARNING) << "crQuickShare: Upgrade negotiation exhausted; session=" << diagnostic_session
+                 << "; reason=" << (timed_out ? "deadline" : "attempt_limit_or_no_medium");
     return Fail("No usable Wi-Fi upgrade path", Failure::kConnection);
   }
   bool UpgradeWifi(const std::function<uint64_t()>& socket_sent_bytes) {
     if (!upgrade_path) return false;
-    const auto path = std::move(*upgrade_path); upgrade_path.reset();
+    auto path = std::move(*upgrade_path); upgrade_path.reset();
     requested_upgrade_medium = path.medium();
     upgrade_path_rejected = false;
     upgrade_in_progress = true;
     const bool lan = path.medium() == nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo::WIFI_LAN;
-    Stage(lan ? "lan_upgrade_connect" : "hotspot_join");
-    const auto deadline = base::TimeTicks::Now() + base::Seconds(lan ? 10 : 40);
+    const bool direct = path.medium() == nc::BandwidthUpgradeNegotiationFrame::UpgradePathInfo::WIFI_DIRECT;
+    const bool go = direct && !path.has_wifi_direct_credentials();
+    if (!go) joining_peer_path = path;
+    Stage(go ? "direct_go_create" : direct ? "direct_client_join" : lan ? "lan_upgrade_connect" : "hotspot_join");
+    const auto deadline = std::min(upgrade_negotiation_deadline,
+        base::TimeTicks::Now() + base::Seconds(lan ? 10 : 40));
     auto service_old = [&]() {
       if (!Active() || upgrade_path_rejected || base::TimeTicks::Now() >= deadline) return false;
       nc::OfflineFrame frame;
@@ -1198,7 +1421,32 @@ struct QuickShareService::Impl::Session {
       result.error = connected.outcome;
       LOG(INFO) << "crQuickShare: LAN upgrade connect; session=" << diagnostic_session
                 << "; outcome=" << connected.outcome << "; errno=" << connected.system_error;
-    } else if (hotspot_connector) {
+    } else if (direct && !go && direct_client) {
+      const auto& direct_credentials = path.wifi_direct_credentials();
+      HotspotCredentials peer{direct_credentials.ssid(), direct_credentials.password(),
+                             direct_credentials.gateway(), direct_credentials.port(), direct_credentials.frequency()};
+      result = direct_client(peer, deadline, service_old);
+    } else if (go && direct_go) {
+      auto group = direct_go(deadline, service_old);
+      if (group) {
+        const auto& credentials_go = group->credentials;
+        auto* go_credentials = path.mutable_wifi_direct_credentials();
+        go_credentials->set_ssid(credentials_go.ssid); go_credentials->set_password(credentials_go.password);
+        go_credentials->set_gateway(credentials_go.gateway); go_credentials->set_port(credentials_go.port);
+        go_credentials->set_frequency(credentials_go.frequency);
+        if (!group->ipv6_address.empty()) go_credentials->set_ip_v6_address(group->ipv6_address);
+        path.set_supports_disabling_encryption(false);
+        path.set_supports_client_introduction_ack(true);
+        auto available = Frame(nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION);
+        auto* proposal = available.mutable_v1()->mutable_bandwidth_upgrade_negotiation();
+        proposal->set_event_type(nc::BandwidthUpgradeNegotiationFrame::UPGRADE_PATH_AVAILABLE);
+        *proposal->mutable_upgrade_path_info() = path;
+        Stage("direct_go_accept");
+        if (Write(available) && Flush()) result.channel = group->Accept(deadline, service_old);
+        result.network = std::move(group);
+      }
+      result.error = "direct_go_setup_or_accept_failed";
+    } else if (!direct && hotspot_connector) {
       result = hotspot_connector(credentials, deadline, service_old);
     }
     auto reject = [&](const char* reason) {
@@ -1218,7 +1466,9 @@ struct QuickShareService::Impl::Session {
         Write(failure_frame);
       }
       upgrade_in_progress = false;
-      // Restoring a network is deliberately deferred until protocol cleanup.
+      joining_peer_path.reset();
+      // The coordinator restores this network before a pre-drain retry.
+      // Terminal/post-drain failures are restored during session cleanup.
       upgrade_network = std::move(result.network);
       return false;
     };
@@ -1281,7 +1531,10 @@ struct QuickShareService::Impl::Session {
     auto* introduction = intro.mutable_v1()->mutable_bandwidth_upgrade_negotiation();
     introduction->set_event_type(nc::BandwidthUpgradeNegotiationFrame::CLIENT_INTRODUCTION);
     introduction->mutable_client_introduction()->set_endpoint_id(local_endpoint);
-    const bool negotiated_plaintext = !lan && path.supports_disabling_encryption();
+    // Match Nearby's client protocol: echo the authenticated path's mode in
+    // CLIENT_INTRODUCTION and apply it only after the old-channel barriers.
+    // Our own GO advertises false; LAN continues to retain UKEY2 encryption.
+    const bool negotiated_plaintext = !go && !lan && path.supports_disabling_encryption();
     introduction->mutable_client_introduction()->set_supports_disabling_encryption(negotiated_plaintext);
     LOG(INFO) << "crQuickShare: Wi-Fi upgrade encryption selection; session=" << diagnostic_session
               << "; peer_has_disabling_encryption=" << path.has_supports_disabling_encryption()
@@ -1289,8 +1542,27 @@ struct QuickShareService::Impl::Session {
               << "; local_disabling_encryption=" << negotiated_plaintext
               << "; encryption_retained=" << !negotiated_plaintext
               << "; introduction_ack_expected=" << path.supports_client_introduction_ack();
-    if (!write_plain(intro)) return reject("client_introduction_write_failed");
-    if (path.supports_client_introduction_ack()) {
+    if (go) {
+      std::string bytes;
+      if (!read_exact(bytes, 4)) return reject("go_introduction_header_failed");
+      uint32_t size = 0;
+      for (unsigned char byte : bytes) size = (size << 8) | byte;
+      if (!size || size > 4096 || !read_exact(bytes, size)) return reject("go_introduction_length");
+      nc::OfflineFrame client;
+      if (!client.ParseFromString(bytes) || client.version() != nc::OfflineFrame::V1 || !client.has_v1() ||
+          client.v1().type() != nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION ||
+          !client.v1().has_bandwidth_upgrade_negotiation()) return reject("go_introduction_invalid");
+      const auto& body = client.v1().bandwidth_upgrade_negotiation();
+      if (body.event_type() != nc::BandwidthUpgradeNegotiationFrame::CLIENT_INTRODUCTION ||
+          !body.has_client_introduction() || body.has_upgrade_path_info() ||
+          body.client_introduction().endpoint_id() != remote_endpoint || remote_endpoint.size() != 4 ||
+          body.client_introduction().supports_disabling_encryption()) return reject("go_introduction_identity_or_cipher");
+      auto ack = Frame(nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION);
+      ack.mutable_v1()->mutable_bandwidth_upgrade_negotiation()->set_event_type(
+          nc::BandwidthUpgradeNegotiationFrame::CLIENT_INTRODUCTION_ACK);
+      if (!write_plain(ack)) return reject("go_introduction_ack_failed");
+    } else if (!write_plain(intro)) return reject("client_introduction_write_failed");
+    if (!go && path.supports_client_introduction_ack()) {
       std::string bytes;
       if (!read_exact(bytes, 4)) return reject("client_introduction_ack_header_failed");
       uint32_t size = 0;
@@ -1387,8 +1659,9 @@ struct QuickShareService::Impl::Session {
     channel_plaintext = negotiated_plaintext;
     upgrade_network = std::move(result.network);
     upgrade_in_progress = false; upgrade_completed = true; upgrade_local_last = false;
+    joining_peer_path.reset();
     last_received = last_keepalive = base::TimeTicks::Now();
-    Stage(lan ? "lan_channel_ready" : "hotspot_channel_ready");
+    Stage(direct ? "direct_channel_ready" : lan ? "lan_channel_ready" : "hotspot_channel_ready");
     LOG(INFO) << "crQuickShare: Wi-Fi upgrade channel upgraded; encryption_retained=" << !channel_plaintext
               << "; negotiated_plaintext=" << channel_plaintext << "; medium=" << channel->name();
     // Verify the negotiated channel with a matching heartbeat ACK. Plaintext
@@ -1577,13 +1850,18 @@ struct QuickShareService::Impl::Session {
     // agree with the transfer policy. This limit applies to the whole batch.
     constexpr int64_t kBluetoothDirectLimit = 72 * 1024;
     bluetooth_direct = bootstrap_sent_bytes && total <= kBluetoothDirectLimit;
-    if (bluetooth_direct) { hotspot_connector = {}; lan_upgrade_enabled = false; }
-    else if (bootstrap_sent_bytes && !hotspot_connector && !lan_upgrade_enabled)
-      return Fail("This batch requires an available Wi-Fi hotspot connection", Failure::kHotspotUnavailable);
+    if (bluetooth_direct) { hotspot_connector = {}; lan_upgrade_enabled = false; direct_go = {}; direct_client = {}; }
+    else if (bootstrap_sent_bytes && !hotspot_connector && !lan_upgrade_enabled && !direct_client)
+      return Fail("This batch requires an available Wi-Fi upgrade path", Failure::kHotspotUnavailable);
     LOG(INFO) << "crQuickShare: Transfer medium selected; session=" << diagnostic_session
               << "; medium=" << (bluetooth_direct ? "BLUETOOTH" :
-                  bootstrap_sent_bytes ? (lan_upgrade_enabled ? "WIFI_LAN_UPGRADE" : "WIFI_HOTSPOT") : "WIFI_LAN")
-              << "; total_bytes=" << total << "; bluetooth_limit_bytes=" << kBluetoothDirectLimit;
+                  bootstrap_sent_bytes ? (direct_client && direct_go_preferred ? "WIFI_DIRECT_CLIENT_UPGRADE" :
+                      hotspot_preferred && hotspot_connector ? "WIFI_HOTSPOT" :
+                      lan_upgrade_enabled ? "WIFI_LAN_UPGRADE" : direct_client ? "WIFI_DIRECT_CLIENT_UPGRADE" : "WIFI_HOTSPOT") : "WIFI_LAN")
+              << "; total_bytes=" << total << "; bluetooth_limit_bytes=" << kBluetoothDirectLimit
+              << "; lan_client=" << lan_upgrade_enabled << "; hotspot_client=" << bool(hotspot_connector)
+              << "; direct_client=" << bool(direct_client) << "; direct_go=" << bool(direct_go) << "; prefer_direct_go=" << direct_go_preferred
+              << "; prefer_hotspot=" << hotspot_preferred;
     if (!Handshake(true) || !Pair()) return false;
     // Offer on the existing authenticated channel so the receiver can show
     // its confirmation before the hotspot association and DHCP delay.
@@ -1763,13 +2041,14 @@ struct QuickShareService::Impl::Session {
     LOG(INFO) << "crQuickShare: Incoming medium selection; session=" << diagnostic_session
               << "; total_bytes=" << total << "; wifi_upgrade_required=" << required
               << "; hotspot_client=" << bool(hotspot_connector)
+              << "; direct_client=" << bool(direct_client) << "; direct_go=" << bool(direct_go)
               << "; lan_client=" << lan_upgrade_enabled
               << "; path_available=" << bool(upgrade_path);
     // Keep small transfers on Bluetooth unless the sender already offered a
     // supported path. Never release ACCEPT until the replacement is verified:
     // the sender can start streaming immediately after receiving it.
-    if (!required && !upgrade_path) return true;
-    if (!hotspot_connector && !lan_upgrade_enabled)
+    if (!required && !upgrade_path && !peer_requested_direct_go) return true;
+    if (!hotspot_connector && !lan_upgrade_enabled && !direct_client && !direct_go)
       return Fail("Large Bluetooth reception requires a Wi-Fi upgrade", Failure::kConnection);
     if (!RequestWifiUpgrade(bootstrap_sent_bytes)) {
       if (!failed && Active())
@@ -1783,7 +2062,7 @@ struct QuickShareService::Impl::Session {
     qs::Frame intro;
     if (!AwaitSharing(intro, qs::V1Frame::INTRODUCTION) || !intro.v1().has_introduction()) return false;
     const auto& offer = intro.v1().introduction();
-    if (bluetooth_direct && !hotspot_connector && !lan_upgrade_enabled) {
+    if (bluetooth_direct && !hotspot_connector && !lan_upgrade_enabled && !direct_client && !direct_go) {
       int64_t bluetooth_total = 0;
       const auto add_size = [&](int64_t size) {
         if (size < 0 || size > 72 * 1024 - bluetooth_total) return false;
@@ -2002,7 +2281,7 @@ void QuickShareService::Impl::Start(std::unique_ptr<TransportChannel> transport,
     Session session(*this, std::move(transport));
     if (outgoing && outgoing->socket_sent_bytes) {
       session.bootstrap_probe = true;
-#if BUILDFLAG(IS_WIN)
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
       session.lan_upgrade_enabled = true;
 #endif
       session.bootstrap_sent_bytes = std::move(outgoing->socket_sent_bytes);
@@ -2369,6 +2648,21 @@ Peer QuickShareService::LocalPeer() const {
   Peer peer;
   peer.id = impl_->endpoint; peer.name = impl_->name; peer.endpoint_info = impl_->endpoint_info;
   return peer;
+}
+void QuickShareService::SetWifiDirectClientConnector(WifiDirectClientConnector connector) {
+  std::lock_guard guard(impl_->mutex);
+  if (!impl_->busy) impl_->direct_client_connector = std::move(connector);
+}
+void QuickShareService::SetPreferHotspotUpgrade(bool prefer_hotspot) {
+  std::lock_guard guard(impl_->mutex);
+  if (!impl_->busy) impl_->prefer_hotspot_upgrade = prefer_hotspot;
+}
+void QuickShareService::SetWifiDirectGoFactory(WifiDirectGoFactory factory, bool prefer_direct) {
+  std::lock_guard guard(impl_->mutex);
+  if (!impl_->busy) {
+    impl_->direct_go_factory = std::move(factory);
+    impl_->prefer_direct_go = prefer_direct;
+  }
 }
 bool QuickShareService::ReceiveBluetooth(std::unique_ptr<TransportChannel> channel,
                                         std::function<uint64_t()> socket_sent_bytes,

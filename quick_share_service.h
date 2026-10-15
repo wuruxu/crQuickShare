@@ -10,6 +10,7 @@
 #include <vector>
 #include "base/files/file_path.h"
 #include "crQuickShare/hotspot_upgrade.h"
+#include "crQuickShare/wifi_direct_go.h"
 
 namespace crquickshare {
 class TransportChannel;
@@ -94,6 +95,12 @@ class QuickShareService {
   // Atomically prevents new incoming sessions when idle, for reconfiguration.
   bool StopReceivingIfIdle();
   void RefreshDiscovery();
+  // Configure only while idle. GO offers and peer-provided client paths are separate roles.
+  void SetWifiDirectClientConnector(WifiDirectClientConnector connector);
+  void SetWifiDirectGoFactory(WifiDirectGoFactory factory, bool prefer_direct = false);
+  // Idle-only diagnostic preference for outgoing Bluetooth upgrade requests.
+  // Requires a hotspot connector; does not override direct LAN connections.
+  void SetPreferHotspotUpgrade(bool prefer_hotspot);
   bool Send(const Peer& peer, std::vector<base::FilePath> paths);
   // UI-selected BLE peer. The UI bridge owns the Bluetooth socket; the worker
   // owns its channel and runs preflight, handshake, upgrade and normal Send.
