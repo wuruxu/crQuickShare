@@ -15,8 +15,8 @@ and Wi-Fi upgrade modules for crFiles.
   transfers, LAN upgrades, Linux hotspot clients, and experimental Linux Wi-Fi
   Direct client/Group Owner roles.
 - **Controlled channel migration.** Validates peer paths, exchanges introduction
-  messages, drains the old channel through protocol barriers, and verifies the
-  replacement channel with a matching heartbeat ACK before transferring files.
+  messages, drains the old channel through protocol barriers, and resumes file
+  traffic on the replacement channel with normal keepalive monitoring.
 - **Network-aware discovery.** Keeps mDNS caches per interface, supports multiple
   IPv4 addresses, and refreshes discovery after link changes or resume. Unchanged
   network notifications avoid unnecessary cache resets.
@@ -192,7 +192,7 @@ information, not authenticated identity; matching names never authorize a transf
 LAN retains UKEY2 encryption. Hotspot and Direct clients can honor an
 authenticated peer's request to disable Nearby record encryption on the
 WPA-protected replacement link; otherwise they retain UKEY2. The local Direct GO
-retains UKEY2. A heartbeat ACK verifies channel operation, not file delivery.
+retains UKEY2. Upgrade completion does not confirm file delivery.
 
 File batches support up to 1,024 regular files and 1 TiB total. The core checks
 metadata, available space, relative paths, payload lengths, and chunk ordering.
@@ -226,12 +226,13 @@ will advertise a LAN endpoint or accept a transport upgrade.
 Logs use the `crQuickShare:` prefix. Follow one `session` through:
 
 ```text
-Connection stage → Upgrade request/path decision → channel verification
+Connection stage → Upgrade request/path decision → channel upgraded
                  → file_transfer → Connection outcome → network cleanup
 ```
 
 - `socket_completed=1` means a local write completed, not that the peer read it.
-- `channel_round_trip=1` means the replacement channel returned a matching ACK.
+- `channel upgraded` means migration completed; normal traffic resumes without
+  a separate heartbeat ACK gate. Regular keepalives monitor the new channel.
 - `delivery_confirmed=1` records confirmed delivery; `success=1` with
   `delivery_confirmed=0` is legacy send completion without explicit delivery ACK.
 - `Receive batch committed` records a completed local file batch.

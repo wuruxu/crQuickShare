@@ -37,7 +37,7 @@ base::ScopedFD ReceiveFolder(int root, const std::string& folder, bool create) {
   }
   return current;
 }
-bool CollectFiles(base::File handle, const std::string& leaf, const std::string& parent,
+bool CollectFiles(const base::FilePath& path, base::File handle, const std::string& leaf, const std::string& parent,
                     std::vector<SourceFile>& files, int64_t& total, size_t& entries,
                     const std::function<bool()>& active, StorageError& error) {
     if (!active()) return false;
@@ -68,7 +68,7 @@ bool CollectFiles(base::File handle, const std::string& leaf, const std::string&
             (!S_ISREG(child_stat.st_mode) && !S_ISDIR(child_stat.st_mode)))
           return StorageFail(error, "Symbolic links and special files cannot be shared", Failure::kSourceFile);
         base::File child(openat(dirfd(directory.get()), child_name.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
-        if (!CollectFiles(std::move(child), child_name, folder, files, total, entries, active, error)) return false;
+        if (!CollectFiles(path.Append(child_name), std::move(child), child_name, folder, files, total, entries, active, error)) return false;
       }
       // The protocol has no directory payload; empty directories contribute no files.
       return true;
@@ -76,7 +76,7 @@ bool CollectFiles(base::File handle, const std::string& leaf, const std::string&
     if (!S_ISREG(st.st_mode) || st.st_size < 0 || st.st_size > kMaxTotal - total)
       return StorageFail(error, "Unreadable, unsupported or oversized source file", Failure::kSourceFile);
     if (files.size() >= kMaxFiles) return StorageFail(error, "Directory selection exceeds 1024 files", Failure::kUnsupported);
-    SourceFile f; f.size = st.st_size; f.name = leaf; f.parent = parent;
+    SourceFile f; f.path = path; f.size = st.st_size; f.name = leaf; f.parent = parent;
     f.handle = std::move(handle); total += f.size;
     files.push_back(std::move(f));
     return true;
@@ -185,7 +185,7 @@ bool LinuxFileStorage::Collect(const std::vector<base::FilePath>& paths, const s
       base::TruncateUTF8ToByteSize(path.BaseName().value(), 240 - tail.size(), &leaf); leaf += tail;
     }
     base::File handle(open(path.StripTrailingSeparators().value().c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
-    if (!CollectFiles(std::move(handle), leaf, "", collected.files, collected.total, collected.entries, active, error)) return false;
+    if (!CollectFiles(path, std::move(handle), leaf, "", collected.files, collected.total, collected.entries, active, error)) return false;
   }
   if (collected.files.empty()) return StorageFail(error, "Selected directories contain no transferable files", Failure::kUnsupported);
   selection = std::move(collected); return true;

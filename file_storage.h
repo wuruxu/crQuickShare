@@ -26,6 +26,7 @@ struct StorageError {
   bool no_space = false;
 };
 struct SourceFile {
+  base::FilePath path;  // Original path for host journaling; never used to reopen.
   std::string name, parent;
   int64_t size = 0;
   base::File handle;  // Opened once; never reopen the original path after consent.

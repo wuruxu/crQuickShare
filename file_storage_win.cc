@@ -99,7 +99,7 @@ bool CollectEntry(const base::FilePath& path, const std::string& leaf, const std
   const uint64_t size = (uint64_t{info.nFileSizeHigh} << 32) | info.nFileSizeLow;
   if (size > static_cast<uint64_t>(kMaxTransferBytes - result.total) || result.files.size() >= kMaxTransferFiles)
     return FailStorage(error, "Source size or file count limit exceeded", Failure::kUnsupported);
-  SourceFile file; file.name = leaf; file.parent = parent; file.size = static_cast<int64_t>(size);
+  SourceFile file; file.path = path; file.name = leaf; file.parent = parent; file.size = static_cast<int64_t>(size);
   file.handle = base::File(handle.release()); result.total += file.size; result.files.push_back(std::move(file));
   return true;
 }

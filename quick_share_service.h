@@ -13,6 +13,18 @@
 #include "crQuickShare/wifi_direct_go.h"
 
 namespace crquickshare {
+// Optional host journal for file transfers. All methods and destruction run on
+// the session worker. An installed factory must return a valid record before IO;
+// returning null aborts the transfer. Hosts without a journal need no factory.
+class TransferJournal {
+ public:
+  virtual ~TransferJournal() = default;
+  virtual void Finish(bool success, bool cancelled,
+                      const base::FilePath& saved_path) = 0;
+};
+using TransferJournalFactory = std::function<std::unique_ptr<TransferJournal>(
+    bool incoming, const std::string& peer, const base::FilePath& local_path,
+    const std::string& remote_path)>;
 class TransportChannel;
 struct LanRoute {
   std::string address, local_address;
@@ -73,11 +85,12 @@ struct Snapshot {
 class QuickShareService {
  public:
   struct ReceivedText { uint64_t session; std::string text; };
-  QuickShareService(std::string name, base::FilePath destination, bool receive_text = false);
+  QuickShareService(std::string name, base::FilePath destination, bool receive_text = false,
+                    TransferJournalFactory journal_factory = {});
   ~QuickShareService();
   Snapshot GetSnapshot() const;
   // Blocking worker-only experiment: handshake, anonymous pairing, optional
-  // hotspot upgrade verification, then close.
+  // hotspot channel migration, then close.
   // Does not start discovery or introduce attachments. An explicitly supplied
   // hotspot connector enables real network/channel migration and rollback.
   // socket_sent_bytes returns a thread-safe cumulative count of completed
