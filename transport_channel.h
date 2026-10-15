@@ -27,6 +27,16 @@ class TransportChannel {
     int system_error = 0;
   };
   virtual ~TransportChannel();
+  struct SetupResult {
+    bool connected = true;
+    bool timed_out = false;
+    std::string error;
+  };
+  // Called after source preflight, before starting protocol handshake timers.
+  // Already connected channels need no setup. Bridges poll cancellation while
+  // reporting their setup stages on the session worker.
+  virtual SetupResult PrepareConnection(const std::function<bool()>& active,
+                                       const std::function<void(const char*)>& stage);
   virtual Result Read(base::span<char> bytes) = 0;
   virtual Result Write(base::span<const char> bytes) = 0;
   // A hangup makes Read ready: buffered data must be consumed before EOF.

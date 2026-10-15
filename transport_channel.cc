@@ -8,6 +8,10 @@
 #include "base/strings/stringprintf.h"
 namespace crquickshare {
 TransportChannel::~TransportChannel() = default;
+TransportChannel::SetupResult TransportChannel::PrepareConnection(
+    const std::function<bool()>&, const std::function<void(const char*)>&) {
+  return {};
+}
 std::string TransportChannel::connection_error() const { return {}; }
 ConnectionListener::~ConnectionListener() = default;
 UpgradeNetwork::~UpgradeNetwork() = default;

@@ -221,6 +221,7 @@ struct QuickShareService::Impl::Session {
   base::TimeTicks upgrade_retry_window;
   qs::V1Frame::FrameType expected_sharing = qs::V1Frame::PAIRED_KEY_ENCRYPTION;
   base::TimeTicks finish_deadline, response_deadline;
+  base::TimeTicks handshake_deadline;
   base::TimeTicks last_received = base::TimeTicks::Now();
   base::TimeDelta keepalive_interval = base::Seconds(5);
   base::TimeDelta keepalive_timeout = base::Seconds(30);
@@ -371,6 +372,7 @@ struct QuickShareService::Impl::Session {
     for (int i = 0; i < 4; ++i) bytes[i] = char(data.size() >> (24 - 8 * i));
     bytes += data;
     size_t sent = 0; auto deadline = base::TimeTicks::Now() + base::Seconds(15);
+    if (!handshake_deadline.is_null()) deadline = std::min(deadline, handshake_deadline);
     while (Active() && sent < bytes.size() && base::TimeTicks::Now() < deadline) {
       const auto result = channel->Write(base::span<const char>(std::string_view(bytes).substr(sent)));
       if (result.status == TransportChannel::Status::kOk && result.bytes) { sent += result.bytes; transport_written_bytes += result.bytes; continue; }
@@ -380,7 +382,13 @@ struct QuickShareService::Impl::Session {
       }
       return WireFail("Transport write failed", result.system_error);
     }
-    if (sent != bytes.size()) return WireFail("Transport write cancelled or timed out");
+    if (sent != bytes.size()) {
+      if (!handshake_deadline.is_null() && base::TimeTicks::Now() >= handshake_deadline) {
+        timed_out = true;
+        return Fail("Handshake timed out", Failure::kConnection);
+      }
+      return WireFail("Transport write cancelled or timed out");
+    }
     return true;
   }
   bool WaitWritable(int wait_ms) {
@@ -483,6 +491,7 @@ struct QuickShareService::Impl::Session {
   }
   bool AwaitRaw(std::string& out) {
     auto deadline = base::TimeTicks::Now() + base::Seconds(15);
+    if (!handshake_deadline.is_null()) deadline = std::min(deadline, handshake_deadline);
     while (Active() && base::TimeTicks::Now() < deadline) { int r = ReadRaw(out, 100); if (r) return r > 0; }
     if (!Active()) return false;
     timed_out = true; return Fail("Handshake timed out");
@@ -888,6 +897,16 @@ struct QuickShareService::Impl::Session {
   }
   bool Handshake(bool is_outgoing) {
     outgoing = is_outgoing;
+    if (outgoing) {
+      const auto setup = channel->PrepareConnection(
+          [this] { return Active(); }, [this](const char* stage) { Stage(stage); });
+      if (!setup.connected) {
+        if (owner.stop || owner.cancel) return false;
+        timed_out = setup.timed_out;
+        return Fail(setup.error, Failure::kConnection);
+      }
+    }
+    handshake_deadline = base::TimeTicks::Now() + base::Seconds(15);
     Stage("connection_request");
     if (outgoing) {
       auto f = Frame(nc::V1Frame::CONNECTION_REQUEST);
@@ -969,6 +988,7 @@ struct QuickShareService::Impl::Session {
     crypto = handshake->ToConnectionContext();
     last_received = last_keepalive = base::TimeTicks::Now();
     if (!crypto) return Fail("Unable to create encrypted channel");
+    handshake_deadline = {};
     Stage("encrypted_channel_ready");
     LOG(INFO) << "crQuickShare: Connection negotiated; session=" << diagnostic_session
               << "; disconnect_version=" << peer_disconnect_version
@@ -2431,6 +2451,7 @@ void QuickShareService::Impl::Start(std::unique_ptr<TransportChannel> transport,
               << "; empty_incoming_connection=" << session.empty_incoming_connection
               << "; elapsed_ms=" << (base::TimeTicks::Now() - session.diagnostic_started).InMilliseconds();
     session.Stage("disconnect_cleanup");
+    session.handshake_deadline = {};
     session.Finish(success);
     if (session.channel) session.channel->Close();
     session.CleanupNetwork();  // Keep admission blocked until explicit cleanup finishes.

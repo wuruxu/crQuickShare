@@ -41,6 +41,9 @@ struct Pipe {
   std::string connection_error;
   bool closed = false, done = false, cancelled = false;
   bool close_requested = false;
+  bool setup_required = false, setup_requested = false;
+  bool gatt_released = false, connected = false;
+  base::TimeTicks connect_started;
   uint64_t sent_bytes = 0;
   // Installed on the UI sequence before publishing this pipe to the worker.
   // Posting never dereferences the UI-owned WeakPtr on the worker sequence.
@@ -69,11 +72,54 @@ class ProbeChannel final : public TransportChannel {
   void Close() override;
   const char* name() const override;
   std::string connection_error() const override;
+  SetupResult PrepareConnection(const std::function<bool()>& active,
+                               const std::function<void(const char*)>& stage) override;
  private:
   std::shared_ptr<Pipe> pipe_;
 };
 ProbeChannel::ProbeChannel(std::shared_ptr<Pipe> pipe) : pipe_(std::move(pipe)) {}
 ProbeChannel::~ProbeChannel() { Close(); }
+TransportChannel::SetupResult ProbeChannel::PrepareConnection(
+    const std::function<bool()>& active,
+    const std::function<void(const char*)>& stage) {
+  {
+    std::lock_guard guard(pipe_->mutex);
+    if (!pipe_->setup_required) return {};
+    pipe_->setup_requested = true;
+  }
+  pipe_->Wake();
+  const auto started = base::TimeTicks::Now();
+  const auto overall_deadline = started + base::Seconds(45);
+  bool connecting = false;
+  stage("gatt_release_wait");
+  while (active()) {
+    std::unique_lock guard(pipe_->mutex);
+    if (pipe_->closed || pipe_->done)
+      return {false, false, pipe_->connection_error.empty() ?
+          "Bluetooth connection setup stopped" : pipe_->connection_error};
+    if (pipe_->gatt_released && !connecting) {
+      connecting = true;
+      guard.unlock();
+      stage("bluetooth_connect");
+      continue;
+    }
+    if (pipe_->connected) return {};
+    const auto until = std::min(overall_deadline, connecting ?
+        pipe_->connect_started + base::Seconds(20) : started + base::Seconds(25));
+    if (base::TimeTicks::Now() >= until) {
+      const std::string error = connecting ? "Bluetooth connection timed out" :
+          "Bluetooth GATT release timed out";
+      pipe_->connection_error = error;
+      pipe_->closed = true;
+      pipe_->changed.notify_all();
+      return {false, true, error};
+    }
+    pipe_->changed.wait_for(guard, std::chrono::milliseconds(100));
+  }
+  std::lock_guard guard(pipe_->mutex);
+  return {false, false, pipe_->connection_error.empty() ?
+      "Bluetooth connection setup cancelled" : pipe_->connection_error};
+}
 std::string ProbeChannel::connection_error() const {
   std::lock_guard guard(pipe_->mutex); return pipe_->connection_error;
 }
@@ -273,6 +319,16 @@ struct BootstrapProbe::Impl {
 #endif
   }
   void Connected(scoped_refptr<device::BluetoothSocket> connected) {
+    {
+      std::unique_lock guard(pipe->mutex);
+      if (pipe->closed || pipe->done) {
+        guard.unlock();
+        connected->Disconnect(base::DoNothing());
+        return;
+      }
+      pipe->connected = true;
+      pipe->changed.notify_all();
+    }
     socket = std::move(connected);
     classic_discovery.reset();
     LOG(INFO) << "crQuickShare: Bootstrap service connected; medium=BLUETOOTH";
@@ -302,11 +358,17 @@ struct BootstrapProbe::Impl {
     if (done) { Stop("transfer_finished"); return; }
     if (pending_peer) {
       bool start_connect;
-      { std::lock_guard guard(pipe->mutex); start_connect = !pipe->outgoing.empty() && !pipe->closed; }
+      { std::lock_guard guard(pipe->mutex); start_connect = pipe->setup_requested && !pipe->closed; }
       if (start_connect && connection_ready) {
         if (!adapter || !adapter->IsPowered()) { Stop("bluetooth_unavailable"); return; }
         auto peer = std::move(*pending_peer); pending_peer.reset();
-        // Begin Bluetooth only after source preflight queues the handshake.
+        // Source preflight has completed; handshake waits for this socket.
+        {
+          std::lock_guard guard(pipe->mutex);
+          pipe->gatt_released = true;
+          pipe->connect_started = base::TimeTicks::Now();
+          pipe->changed.notify_all();
+        }
         attempted = false;
         Observe(adapter, peer);
       }
@@ -438,6 +500,7 @@ bool BootstrapProbe::Send(scoped_refptr<device::BluetoothAdapter> adapter, const
   impl_->endpoint = peer.id;
   impl_->hotspot = std::move(hotspot);
   auto shared = impl_->pipe;
+  shared->setup_required = true;
   if (!service.SendBluetooth(peer, std::move(paths), std::make_unique<ProbeChannel>(shared),
       [shared] { std::lock_guard guard(shared->mutex); return shared->sent_bytes; }, impl_->hotspot,
       [shared] { std::lock_guard guard(shared->mutex); return shared->cancelled; },
