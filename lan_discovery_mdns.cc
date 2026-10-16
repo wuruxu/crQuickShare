@@ -593,7 +593,7 @@ bool MdnsDiscovery::AllowVisibilityLog(base::TimeTicks now) {
   if (visibility_log_window_.is_null() || now - visibility_log_window_ >= base::Seconds(30)) {
     visibility_log_window_ = now; visibility_logs_ = 0;
   }
-  if (visibility_logs_ >= 64) { ++visibility_logs_suppressed_; return false; }
+  if (visibility_logs_ >= 16) { ++visibility_logs_suppressed_; return false; }
   ++visibility_logs_; return true;
 }
 void MdnsDiscovery::DiagnoseVisibility(base::TimeTicks now) {

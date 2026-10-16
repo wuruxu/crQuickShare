@@ -12,6 +12,7 @@
 #include "base/containers/span.h"
 #include "base/base64url.h"
 #include "base/strings/stringprintf.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/functional/bind.h"
@@ -269,25 +270,8 @@ std::optional<GattHeader> ParseGattHeader(std::string_view bytes) {
   }
   return GattHeader{std::string(bytes), slots};
 }
-bool SameDiscoveryKey(const Peer& a, const Peer& b) {
-  return a.endpoint_info.size() >= 17 && b.endpoint_info.size() >= 17 &&
-      a.endpoint_info.compare(1, 16, b.endpoint_info, 1, 16) == 0;
-}
 bool SameEndpoint(const Peer& a, const Peer& b) {
-  // Salt and metadata-key hash occupy bytes 1..16. Bit 4 of the header only
-  // indicates whether a public name is present (sharing/advertisement.cc).
-  // Keep all other header bits and the endpoint ID in the comparison. These
-  // untrusted discovery hints are never account or pairing verification.
-  return a.id == b.id && SameDiscoveryKey(a, b) &&
-      ((static_cast<uint8_t>(a.endpoint_info[0]) ^
-        static_cast<uint8_t>(b.endpoint_info[0])) & 0xef) == 0;
-}
-bool SameBluetoothRoute(const Peer& a, const Peer& b) {
-  // Only coalesce BLE list entries. A protocol-provided address is a routing
-  // hint, not authenticated identity, and must not weaken LAN association.
-  return a.ble_only && b.ble_only && a.id.size() == 4 && a.id == b.id &&
-      !a.classic_bluetooth_address.empty() &&
-      a.classic_bluetooth_address == b.classic_bluetooth_address;
+  return a.id == b.id && a.endpoint_info == b.endpoint_info;
 }
 std::string AdvertisementHash(std::string_view bytes) {
   const auto digest = crypto::hash::Sha256(bytes);
@@ -303,6 +287,10 @@ std::string SystemName(device::BluetoothAdapter* adapter, const std::string& add
 }
 }  // namespace
 struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
+  // Snapshot inputs are polled repeatedly. Remember each source's last info
+  // so unchanged old records cannot replace a newer endpoint generation.
+  std::map<std::string, std::string> discovery_source_info;
+  std::map<std::string, std::string> endpoint_info_by_id;
   struct Record { Peer peer; base::TimeTicks seen; std::string advertisement_hash; };
   struct Observation {
     std::string bytes;
@@ -359,7 +347,6 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
   std::string pending_gatt_address;
   base::TimeTicks pending_gatt_started, next_gatt_blocked_log;
   base::TimeTicks next_gatt_start;
-  base::TimeTicks next_association_log;
   State current = State::kIdle;
   bool wanted = false, initializing = false, pending = false;
   bool retain_cache = false;
@@ -1068,6 +1055,10 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
 BleDiscovery::BleDiscovery() : impl_(std::make_unique<Impl>()) {}
 BleDiscovery::~BleDiscovery() = default;
 void BleDiscovery::Update(bool enabled, bool retain_cache) {
+  if (!enabled && !retain_cache) {
+    impl_->discovery_source_info.clear();
+    impl_->endpoint_info_by_id.clear();
+  }
   const bool preserve = !enabled && retain_cache;
   if (impl_->retain_cache != preserve) {
     LOG(INFO) << "crQuickShare: BLE discovery cache retention; paused=" << preserve
@@ -1090,7 +1081,6 @@ void BleDiscovery::Update(bool enabled, bool retain_cache) {
       impl_->parse_counts.clear();
       impl_->lost_removed = impl_->lost_suppressed = impl_->property_only = 0;
       impl_->next_ignored_log = {};
-      impl_->next_association_log = {};
     }
   }
   if (!enabled) { impl_->bootstrap_waiting_for_gatt = false; impl_->bootstrap.Cancel(); }
@@ -1111,14 +1101,14 @@ std::vector<Peer> BleDiscovery::MergeWithLan(std::vector<Peer> peers) const {
   struct Candidate {
     Peer peer;
     base::TimeTicks seen;
-    const char* source;
+    std::string source_key;
     std::string system_name;
   };
   std::vector<Candidate> candidates;
   bool probe_candidate = false;
   const auto now = base::TimeTicks::Now();
   auto append = [&](const Peer& peer, const std::string& address,
-                    base::TimeTicks seen, const char* source) {
+                    base::TimeTicks seen, const char* source, unsigned slot = 0) {
     if (now - seen >= kLifetime) return;
     if (!impl_->discovery_started.is_null()) {
       const bool connectable = !EndpointName(peer.endpoint_info).empty() &&
@@ -1135,7 +1125,10 @@ std::vector<Peer> BleDiscovery::MergeWithLan(std::vector<Peer> peers) const {
         impl_->first_connectable_logged |= connectable;
       }
     }
-    candidates.push_back({peer, seen, source, SystemName(impl_->adapter.get(), address)});
+    candidates.push_back({peer, seen,
+        std::string(source) + ":" + address + ":" + base::NumberToString(slot) +
+            ":" + base::HexEncode(peer.id),
+        SystemName(impl_->adapter.get(), address)});
     candidates.back().peer.bluetooth_address = address;
     if (impl_->bootstrap.CanProbe(peer)) {
       probe_candidate = true;
@@ -1153,118 +1146,70 @@ std::vector<Peer> BleDiscovery::MergeWithLan(std::vector<Peer> peers) const {
     append(record.peer, address, record.seen, "advertisement");
   for (const auto& [address, entry] : impl_->gatt_entries)
     for (const auto& [slot, record] : entry.slots)
-      append(record.peer, address, std::min(entry.seen, record.seen), "gatt");
+      append(record.peer, address, std::min(entry.seen, record.seen), "gatt", slot);
   if (!probe_candidate) impl_->bootstrap_waiting_for_gatt = false;
-  // Retain the most recently observed address, instead of the first address in
-  // map order. A protocol name from an older matching record can still help.
+  // Prefer the most recently observed address over map iteration order.
   std::ranges::stable_sort(candidates, [](const Candidate& a, const Candidate& b) {
     return a.seen > b.seen;
   });
-  if (!candidates.empty() && now >= impl_->next_association_log) {
-    impl_->next_association_log = now + base::Seconds(30);
-    // Bound diagnostics on crowded networks. Never print names, salts, key
-    // hashes or raw advertisements; equality flags suffice for correlation.
-    const size_t limit = std::min(candidates.size(), size_t{16});
-    LOG(INFO) << "crQuickShare: BLE association snapshot; records=" << candidates.size()
-              << "; logged=" << limit << "; lan_peers=" << peers.size();
-    for (size_t i = 0; i < std::min(peers.size(), size_t{16}); ++i) {
-      const auto& lan = peers[i];
-      LOG(INFO) << "crQuickShare: LAN association record; cache_id=" << lan.discovery_cache_id
-                << "; interface=" << lan.discovery_interface << "; endpoint_id=" << base::HexEncode(lan.id)
-                << "; lan_ipv4=" << lan.address << "; port=" << lan.port << "; named=" << !lan.name.empty();
+  // Match Nearby BasePcpHandler::OnEndpointFound: endpoint ID identifies
+  // the device; changing endpoint_info replaces its previous medium records.
+  // Keep only routes carrying the selected full info, never splice a new BLE
+  // advertisement onto a LAN route from the previous generation.
+  std::set<std::string> present_sources;
+  std::set<std::string> present_ids;
+  const auto observe = [&](const std::string& source, const Peer& peer) {
+    if (peer.id.size() != 4 || peer.endpoint_info.empty()) return;
+    present_sources.insert(source);
+    present_ids.insert(peer.id);
+    const auto previous = impl_->discovery_source_info.find(source);
+    if (previous != impl_->discovery_source_info.end() &&
+        previous->second == peer.endpoint_info) return;
+    impl_->discovery_source_info[source] = peer.endpoint_info;
+    auto [selected, inserted] = impl_->endpoint_info_by_id.try_emplace(
+        peer.id, peer.endpoint_info);
+    if (!inserted && selected->second != peer.endpoint_info) {
+      LOG(INFO) << "crQuickShare: Discovery endpoint info replaced; endpoint_id="
+                << base::HexEncode(peer.id) << "; source=" << source;
+      selected->second = peer.endpoint_info;
     }
-    for (size_t i = 0; i < limit; ++i) {
-      const auto& item = candidates[i];
-      const auto& peer = item.peer;
-      LOG(INFO) << "crQuickShare: BLE association record; index=" << i
-                << "; address=" << peer.bluetooth_address << "; source=" << item.source
-                << "; endpoint_id=" << base::HexEncode(peer.id)
-                << "; info_header=" << static_cast<unsigned>(static_cast<uint8_t>(peer.endpoint_info[0]))
-                << "; name_source=" << (!peer.name.empty() ? "quick_share" :
-                    !item.system_name.empty() ? "bluez" : "none")
-                << "; classic_address_present=" << !peer.classic_bluetooth_address.empty()
-                << "; age_ms=" << (now - item.seen).InMilliseconds()
-                << "; lan_match=" << std::ranges::any_of(peers, [&](const Peer& lan) { return SameEndpoint(lan, peer); });
-      size_t lan_logged = 0;
-      for (const auto& lan : peers) {
-        if (lan_logged >= 16) break;
-        const bool same_id = lan.id == peer.id;
-        const bool same_key = SameDiscoveryKey(lan, peer);
-        if (!same_id && !same_key) continue;
-        ++lan_logged;
-        LOG(INFO) << "crQuickShare: BLE LAN association; ble_index=" << i
-                  << "; cache_id=" << lan.discovery_cache_id << "; interface=" << lan.discovery_interface
-                  << "; lan_ipv4=" << lan.address << "; port=" << lan.port
-                  << "; same_endpoint_id=" << same_id << "; same_discovery_key=" << same_key
-                  << "; same_header=" << (((uint8_t(lan.endpoint_info[0]) ^ uint8_t(peer.endpoint_info[0])) & 0xef) == 0)
-                  << "; lan_named=" << !lan.name.empty() << "; ble_named=" << !EndpointName(peer.endpoint_info).empty()
-                  << "; merge=" << SameEndpoint(lan, peer);
-      }
-      for (size_t j = 0; j < i; ++j) {
-        const auto& other = candidates[j];
-        const auto& name = peer.name.empty() ? item.system_name : peer.name;
-        const auto& other_name = other.peer.name.empty() ? other.system_name : other.peer.name;
-        const bool same_name = !name.empty() && name == other_name;
-        const bool same_id = peer.id == other.peer.id;
-        const bool same_key = SameDiscoveryKey(peer, other.peer);
-        const bool same_endpoint = SameEndpoint(peer, other.peer);
-        const bool same_route = SameBluetoothRoute(peer, other.peer);
-        if (!same_name && !same_id && !same_key) continue;
-        LOG(INFO) << "crQuickShare: BLE association pair; first=" << j << "; second=" << i
-                  << "; same_display_name=" << same_name << "; same_endpoint_id=" << same_id
-                  << "; same_discovery_key=" << same_key
-                  << "; same_header=" << (peer.endpoint_info[0] == other.peer.endpoint_info[0])
-                  << "; same_bluetooth_route=" << same_route
-                  << "; merge=" << (same_endpoint || same_route)
-                  << "; merge_reason=" << (same_endpoint ? "discovery_key" : same_route ? "bluetooth_route" : "distinct");
-      }
-    }
+  };
+  // LAN snapshots have no observation timestamp. Process their changes first,
+  // then BLE changes oldest first so the newest BLE observation wins a batch.
+  for (const auto& lan : peers) {
+    observe("lan:" + base::NumberToString(lan.discovery_cache_id) + ":" +
+                base::NumberToString(lan.discovery_interface) + ":" +
+                base::HexEncode(lan.id), lan);
   }
-  for (auto& lan : peers) {
-    if (!lan.name.empty()) continue;
-    for (const auto& item : candidates) {
-      if (!SameEndpoint(lan, item.peer)) continue;
-      const auto public_name = EndpointName(item.peer.endpoint_info);
-      if (public_name.empty()) continue;
-      lan.name = public_name;
-      lan.public_name_info = item.peer.endpoint_info;
-      lan.bluetooth_address = item.peer.bluetooth_address;
-      break;
-    }
+  for (auto it = candidates.rbegin(); it != candidates.rend(); ++it) {
+    observe(it->source_key, it->peer);
   }
-  std::vector<Peer> nearby;
-  for (const auto& item : candidates) {
-    const auto& candidate = item.peer;
-    if (std::ranges::any_of(peers, [&](const Peer& peer) { return SameEndpoint(peer, candidate); })) continue;
-    auto existing = std::ranges::find_if(nearby, [&](const Peer& peer) {
-      return SameEndpoint(peer, candidate) || SameBluetoothRoute(peer, candidate);
-    });
-    if (existing == nearby.end()) nearby.push_back(candidate);
-    else if (SameEndpoint(*existing, candidate)) {
-      // Candidates are newest first. Across discovery-key rotations retain
-      // the latest record intact; only supplement matching discovery data.
-      if (existing->name.empty() && !candidate.name.empty()) {
-        existing->name = candidate.name;
-        existing->endpoint_info = candidate.endpoint_info;
-      }
-      if (existing->classic_bluetooth_address.empty())
-        existing->classic_bluetooth_address = candidate.classic_bluetooth_address;
-    }
-  }
-  // Apply BlueZ names after protocol-name merging; do not alter cached
-  // identities, TTLs, or diagnostics about names carried in advertisements.
-  for (auto& peer : nearby) {
-    if (peer.name.empty()) peer.name = SystemName(impl_->adapter.get(), peer.bluetooth_address);
-  }
-  std::ranges::sort(nearby, [](const Peer& a, const Peer& b) {
-    return std::tie(a.id, a.endpoint_info) < std::tie(b.id, b.endpoint_info);
+  std::erase_if(impl_->discovery_source_info, [&](const auto& item) {
+    return !present_sources.contains(item.first);
   });
-  // Anonymous LAN candidates remain in the service snapshot for association,
-  // but never appear as selectable devices without a matching public name.
-  std::erase_if(peers, [](const Peer& peer) { return peer.name.empty(); });
-  peers.insert(peers.end(), nearby.begin(), nearby.end());
-  // DCT cannot establish SameEndpoint with FEF3/LAN. It deliberately bypasses
-  // that identity merge, and carries no fabricated Sharing endpoint_info.
+  std::erase_if(impl_->endpoint_info_by_id, [&](const auto& item) {
+    return !present_ids.contains(item.first);
+  });
+  const auto current_info = [&](const Peer& peer) {
+    const auto selected = impl_->endpoint_info_by_id.find(peer.id);
+    return selected != impl_->endpoint_info_by_id.end() &&
+        selected->second == peer.endpoint_info;
+  };
+  std::erase_if(peers, [&](const Peer& peer) { return !current_info(peer); });
+  std::set<std::string> emitted_ids;
+  std::erase_if(peers, [&](const Peer& peer) {
+    return peer.name.empty() || !emitted_ids.insert(peer.id).second;
+  });
+  for (const auto& item : candidates) {
+    if (!current_info(item.peer) || !emitted_ids.insert(item.peer.id).second)
+      continue;
+    // Candidates are newest first. Keep one complete route, including its
+    // protocol name and Bluetooth address, without reviving older GATT info.
+    Peer peer = item.peer;
+    if (peer.name.empty()) peer.name = item.system_name;
+    peers.push_back(std::move(peer));
+  }
+  // DCT carries no Sharing endpoint_info and uses its separate discovery path.
   for (const auto& [address, record] : impl_->dct_records) {
     if (now - record.seen < kLifetime) peers.push_back(record.peer);
   }

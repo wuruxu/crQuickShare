@@ -123,8 +123,20 @@ struct QuickShareService::Impl {
   }
   ~Impl() {
     stop = true; cancel = true;
-    if (discovery_thread.joinable()) discovery_thread.join();
-    if (session_thread.joinable()) session_thread.join();
+    if (discovery_thread.joinable()) {
+      const auto started = base::TimeTicks::Now();
+      LOG(INFO) << "crQuickShare shutdown: stage=discovery_thread; event=started";
+      discovery_thread.join();
+      LOG(INFO) << "crQuickShare shutdown: stage=discovery_thread; event=finished; elapsed_ms="
+                << (base::TimeTicks::Now() - started).InMilliseconds();
+    }
+    if (session_thread.joinable()) {
+      const auto started = base::TimeTicks::Now();
+      LOG(INFO) << "crQuickShare shutdown: stage=session_thread; event=started";
+      session_thread.join();
+      LOG(INFO) << "crQuickShare shutdown: stage=session_thread; event=finished; elapsed_ms="
+                << (base::TimeTicks::Now() - started).InMilliseconds();
+    }
   }
   template<class F> void Update(F f) { std::lock_guard guard(mutex); f(state); ++state.revision; }
   void PhaseChanged(Phase phase) {
@@ -1528,7 +1540,8 @@ struct QuickShareService::Impl::Session {
     }
     auto reject = [&](const char* reason) {
       if (result.channel) result.channel->Close();
-      LOG(WARNING) << "crQuickShare: Wi-Fi upgrade failed; reason=" << reason
+      LOG(WARNING) << "crQuickShare: Wi-Fi upgrade failed; session=" << diagnostic_session
+                   << "; reason=" << reason
                    << "; local_last=" << upgrade_local_last << "; peer_last=" << upgrade_peer_last;
       // Once either end has committed to draining the old channel, resuming
       // application writes on Bluetooth would violate the shared cipher order.
@@ -1629,10 +1642,31 @@ struct QuickShareService::Impl::Session {
           client.v1().type() != nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION ||
           !client.v1().has_bandwidth_upgrade_negotiation()) return reject("go_introduction_invalid");
       const auto& body = client.v1().bandwidth_upgrade_negotiation();
-      if (body.event_type() != nc::BandwidthUpgradeNegotiationFrame::CLIENT_INTRODUCTION ||
-          !body.has_client_introduction() || body.has_upgrade_path_info() ||
-          body.client_introduction().endpoint_id() != remote_endpoint || remote_endpoint.size() != 4 ||
-          body.client_introduction().supports_disabling_encryption()) return reject("go_introduction_identity_or_cipher");
+      const auto& peer_intro = body.client_introduction();
+      const auto& received_endpoint = peer_intro.endpoint_id();
+      // Bound malformed identity output; never log credentials or cipher keys.
+      LOG(INFO) << "crQuickShare: GO introduction diagnostics; session=" << diagnostic_session
+                << "; outgoing=" << outgoing
+                << "; has_event=" << body.has_event_type()
+                << "; event=" << static_cast<int>(body.event_type())
+                << "; has_introduction=" << body.has_client_introduction()
+                << "; has_path=" << body.has_upgrade_path_info()
+                << "; has_endpoint=" << peer_intro.has_endpoint_id()
+                << "; expected_endpoint_bytes=" << remote_endpoint.size()
+                << "; expected_endpoint_hex=" << base::HexEncode(std::string_view(remote_endpoint).substr(0, 16))
+                << "; received_endpoint_bytes=" << received_endpoint.size()
+                << "; received_endpoint_hex=" << base::HexEncode(std::string_view(received_endpoint).substr(0, 16))
+                << "; endpoint_match=" << (received_endpoint == remote_endpoint)
+                << "; has_disabling_encryption=" << peer_intro.has_supports_disabling_encryption()
+                << "; disabling_encryption=" << peer_intro.supports_disabling_encryption()
+                << "; local_disabling_encryption=" << negotiated_plaintext;
+      if (body.event_type() != nc::BandwidthUpgradeNegotiationFrame::CLIENT_INTRODUCTION)
+        return reject("go_introduction_wrong_event");
+      if (!body.has_client_introduction()) return reject("go_introduction_missing_body");
+      if (body.has_upgrade_path_info()) return reject("go_introduction_unexpected_path");
+      if (remote_endpoint.size() != 4) return reject("go_introduction_expected_endpoint_length");
+      if (received_endpoint != remote_endpoint) return reject("go_introduction_endpoint_mismatch");
+      if (peer_intro.supports_disabling_encryption()) return reject("go_introduction_disabling_encryption");
       auto ack = Frame(nc::V1Frame::BANDWIDTH_UPGRADE_NEGOTIATION);
       ack.mutable_v1()->mutable_bandwidth_upgrade_negotiation()->set_event_type(
           nc::BandwidthUpgradeNegotiationFrame::CLIENT_INTRODUCTION_ACK);
@@ -2315,6 +2349,9 @@ void QuickShareService::Impl::Start(std::unique_ptr<TransportChannel> transport,
     }
     session.buffer = std::move(initial_record);
     session.outgoing = outgoing.has_value();
+    // Outgoing sessions already know the peer's endpoint from discovery.
+    // Preserve it for identity validation when accepting an upgrade as GO.
+    if (outgoing) session.remote_endpoint = outgoing->peer.id;
     std::vector<Session::File> prepared_files;
     qs::Frame prepared_intro;
     int64_t prepared_total = 0;
