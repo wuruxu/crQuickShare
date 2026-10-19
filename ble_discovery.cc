@@ -40,6 +40,7 @@ namespace {
 constexpr char kServiceUuid[] = "0000fef3-0000-1000-8000-00805f9b34fb";
 constexpr char kDctServiceUuid[] = "0000fc73-0000-1000-8000-00805f9b34fb";
 constexpr auto kLifetime = base::Seconds(120);
+constexpr auto kGattCandidateFreshness = base::Seconds(6);
 constexpr size_t kMaxRecords = 128;
 
 bool SameEndpoint(const Peer& a, const Peer& b) {
@@ -92,6 +93,8 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
     base::TimeTicks resolved = {};  // Full read started here; advertising never renews it.
     unsigned failures = 0;
     bool skip_logged = false;
+    base::TimeTicks last_advertisement = {};
+    uint64_t last_token = 0, failed_token = 0;
   };
   struct GattRequest {
     uint64_t token;
@@ -371,7 +374,7 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
       if (entry == gatt_entries.end() && gatt_entries.size() >= kMaxRecords) return;
       const auto now = base::TimeTicks::Now();
       if (entry == gatt_entries.end()) {
-        gatt_entries.emplace(address, GattEntry{std::move(*header), now, {}, {}, {}});
+        entry = gatt_entries.emplace(address, GattEntry{std::move(*header), now, {}, {}, {}}).first;
         LOG(INFO) << "crQuickShare: BLE GATT header discovered";
       } else {
         entry->second.seen = now;
@@ -381,12 +384,17 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
           const size_t cleared_slots = entry->second.slots.size();
           entry->second.header = std::move(*header); entry->second.slots.clear();
           entry->second.resolved = {}; entry->second.failures = 0; entry->second.skip_logged = false;
+          entry->second.last_token = 0; entry->second.failed_token = 0;
+          entry->second.last_advertisement = {};
           entry->second.retry = std::max(now, entry->second.last_attempt + base::Seconds(5));
           LOG(INFO) << "crQuickShare: BLE GATT header changed; cached_slots_cleared=" << cleared_slots << "; refresh_delay_ms="
                     << (entry->second.retry - now).InMilliseconds();
           if (gatt_request && gatt_request->address == address) FinishGatt("header_changed", false);
         }
       }
+      // Property notifications can contain cached service data. Only a received
+      // advertisement authorizes a new connection or a retry.
+      if (advertisement_event) entry->second.last_advertisement = now;
       return;
     }
     const char* reason = "unknown";
@@ -493,6 +501,18 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, std::move(connection_ready_callback));
   }
+  void DeferGattRetry(GattEntry& entry, uint64_t token, const char* outcome) {
+    if (entry.failed_token != token) {
+      entry.failures = std::min(entry.failures + 1, 3u);
+      entry.failed_token = token;
+    }
+    const unsigned delay = 30u << (entry.failures - 1);
+    entry.retry = std::max(entry.retry, base::TimeTicks::Now() + base::Seconds(delay));
+    ++gatt_backoffs;
+    LOG(INFO) << "crQuickShare: BLE GATT retry deferred; request=" << token
+              << "; failures=" << entry.failures << "; retry_ms=" << delay * 1000
+              << "; reason=" << outcome;
+  }
   void FinishGatt(const char* outcome, bool commit, bool allow_partial = false) {
     if (!gatt_request) return;
     // Clear active state before releasing the connection (BlueZ can notify).
@@ -512,13 +532,7 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
         entry->second.resolved = done.started;
         entry->second.retry = now + base::Seconds(60);
       } else if (failed) {
-        entry->second.failures = std::min(entry->second.failures + 1, 3u);
-        const unsigned delay = 30u << (entry->second.failures - 1);
-        entry->second.retry = now + base::Seconds(delay);
-        ++gatt_backoffs;
-        LOG(INFO) << "crQuickShare: BLE GATT retry deferred; request=" << done.token
-                  << "; failures=" << entry->second.failures << "; retry_ms=" << delay * 1000
-                  << "; reason=" << outcome;
+        DeferGattRetry(entry->second, done.token, outcome);
       }
       // Pausing or cancellation is not a device failure. Partial reads cannot
       // establish that every slot is known, even if one endpoint is usable.
@@ -619,6 +633,9 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
     for (auto it = gatt_entries.begin(); it != gatt_entries.end(); ++it) {
       if (now < it->second.retry || !adapter->GetDevice(it->first)) continue;
       auto& entry = it->second;
+      if (entry.last_advertisement.is_null() ||
+          now - entry.last_advertisement >= kGattCandidateFreshness ||
+          entry.last_advertisement <= entry.last_attempt) continue;
       const int priority = GattPriority(entry, now);
       // Refresh before slot expiry so skipping a redundant read does not
       // deliberately create a gap in the visible device cache.
@@ -648,6 +665,7 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
                 << "; failures=" << entry.failures;
       gatt_request.emplace();
       gatt_request->token = ++next_gatt_token;
+      entry.last_token = gatt_request->token;
       gatt_request->address = address; gatt_request->header = entry.header.bytes;
       gatt_request->slots = entry.header.slots;
       gatt_request->started = now;
@@ -688,6 +706,13 @@ struct BleDiscovery::Impl : device::BluetoothAdapter::Observer {
               << "; gatt_connected=" << (device && device->IsGattConnected())
               << "; services_complete=" << (device && device->IsGattServicesDiscoveryComplete());
     if (!gatt_request || gatt_request->token != token || !wanted) {
+      // Pausing ends resolution, not the underlying Connect request. Preserve
+      // its failure backoff without touching a newer header or request.
+      auto entry = gatt_entries.find(address);
+      if (entry != gatt_entries.end() && entry->second.last_token == token &&
+          (error || !connection || !connection->IsConnected())) {
+        DeferGattRetry(entry->second, token, "late_connect_failed");
+      }
       ReleaseGatt(address, std::move(connection));
       NotifyConnectionReady();
       return;
