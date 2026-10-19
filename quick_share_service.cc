@@ -300,7 +300,7 @@ struct QuickShareService::Impl::Session {
     uint64_t file_index = 0;
   };
   std::map<int64_t, SentPayload> sent_payloads, sent_controls;
-  struct TextPayload { int64_t size = 0; std::string body; bool complete = false; bool ack_sent = false; };
+  struct TextPayload { int64_t size = 0; std::string body; bool complete = false; };
   std::map<int64_t, TextPayload> text_payloads;
   struct ChunkSequence {
     std::optional<bool> indexed;
@@ -969,7 +969,7 @@ struct QuickShareService::Impl::Session {
       if (peer_name.empty() || r.endpoint_id().size() != 4) return Fail("Invalid endpoint information");
       remote_endpoint = r.endpoint_id();
       const auto& peer_info = r.has_endpoint_info() ? r.endpoint_info() : r.endpoint_name();
-      owner.Update([&](Snapshot& s) { s.peer_name = peer_name; s.peer_device_type = (static_cast<uint8_t>(peer_info[0]) >> 1) & 7; });
+      owner.Update([&](Snapshot& s) { s.peer_name = peer_name; s.peer_device_type = EndpointDeviceType(peer_info); });
     }
     Stage("ukey2");
     using Handshake = securegcm::UKey2Handshake;
@@ -1046,7 +1046,8 @@ struct QuickShareService::Impl::Session {
   void RetireSentControls() {
     for (auto& [id, payload] : sent_controls) payload.retired = true;
   }
-  bool Ack(int64_t id) {
+  // Match Nearby PayloadManager: received ACKs apply to FILE, not BYTES.
+  bool AckFile(int64_t id) {
     if (!SupportsAck()) return true;
     auto f = Frame(nc::V1Frame::PAYLOAD_TRANSFER);
     auto* p = f.mutable_v1()->mutable_payload_transfer(); p->set_packet_type(nc::PayloadTransferFrame::PAYLOAD_ACK);
@@ -1126,10 +1127,16 @@ struct QuickShareService::Impl::Session {
     if (!p.has_payload_header() || !h.has_id()) return Fail("Missing payload header");
     if (p.packet_type() == nc::PayloadTransferFrame::PAYLOAD_ACK) {
       auto it = sent_payloads.find(h.id());
-      if (it == sent_payloads.end() || !it->second.last_sent || it->second.offset != it->second.size)
+      // Like upstream ProcessPayloadAckPacket, ignore IDs without an outgoing
+      // file. This includes incoming payloads and BYTES control messages.
+      if (it == sent_payloads.end()) {
+        VLOG(1) << "crQuickShare: Ignoring ACK without an outgoing file; session=" << diagnostic_session;
+        return true;
+      }
+      // Repeated ACKs are idempotent, not protocol-message duplicates.
+      if (it->second.acknowledged) return true;
+      if (!it->second.last_sent || it->second.offset != it->second.size)
         return Fail("Acknowledgement does not match a completed outgoing payload");
-      if (it->second.acknowledged && ++duplicate_messages > 16)
-        return Fail("Too many duplicate messages");
       it->second.acknowledged = true; return true;
     }
     if (p.packet_type() == nc::PayloadTransferFrame::CONTROL) {
@@ -1184,10 +1191,6 @@ struct QuickShareService::Impl::Session {
         s.transferred += chunk.body().size();
         if (item.complete) ++s.completed_files;
       });
-      if (item.complete && !std::ranges::all_of(text_payloads, [](const auto& entry) { return entry.second.complete; })) {
-        if (!Ack(h.id())) return false;
-        item.ack_sent = true;
-      }
       return true;
     }
     if (finishing && batch_committed && p.packet_type() == nc::PayloadTransferFrame::DATA && h.type() == Header::FILE) {
@@ -2074,7 +2077,6 @@ struct QuickShareService::Impl::Session {
       owner.received_texts.push_back({owner.state.session, std::move(content)});
     }
     batch_committed = true;
-    for (auto id : order) if (!text_payloads.at(id).ack_sent && !Ack(id)) break;
     LOG(INFO) << "crQuickShare: Text batch received; session=" << diagnostic_session << "; attachments=" << order.size()
               << "; total_bytes=" << total;
     return true;
@@ -2206,7 +2208,7 @@ struct QuickShareService::Impl::Session {
         f.complete = true; ++completed; last_completed_id = f.id;
         owner.Update([&](Snapshot& s) { s.completed_files = completed; });
         // Defer the final ACK until the complete batch has been committed.
-        if (completed != files.size() && (!Ack(f.id) || !Flush())) return false;
+        if (completed != files.size() && (!AckFile(f.id) || !Flush())) return false;
       }
     }
     if (!Active()) return false;
@@ -2218,7 +2220,7 @@ struct QuickShareService::Impl::Session {
       LOG(WARNING) << "crQuickShare: Receive batch saved but directory durability is unconfirmed; session=" << diagnostic_session;
     LOG(INFO) << "crQuickShare: Receive batch committed; session=" << diagnostic_session << "; files=" << completed;
     owner.Update([&](Snapshot& s) { s.received_directory = batch->saved_directory(); });
-    if (!Ack(last_completed_id))
+    if (!AckFile(last_completed_id))
       LOG(WARNING) << "crQuickShare: Final payload ACK could not be queued after commit; session=" << diagnostic_session;
     // Files are received even if the peer disconnects during the final ACK.
     return true;
@@ -2319,8 +2321,7 @@ void QuickShareService::Impl::Start(std::unique_ptr<TransportChannel> transport,
     s.busy = true; s.incoming = !outgoing; s.phase = Phase::kConnecting;
     s.peer_name = outgoing ? outgoing->peer.name : std::string(); s.code.clear(); s.files.clear();
     s.text_count = 0; s.text_is_url = false;
-    s.peer_device_type = outgoing && !outgoing->peer.endpoint_info.empty() ?
-        (static_cast<uint8_t>(outgoing->peer.endpoint_info[0]) >> 1) & 7 : 0;
+    s.peer_device_type = outgoing ? EndpointDeviceType(outgoing->peer.endpoint_info) : 0;
     s.transferred = s.total = 0; s.diagnostic.clear(); s.received_directory.clear();
     s.failure = Failure::kNone;
     ResetProgress();
@@ -2662,7 +2663,7 @@ bool QuickShareService::Send(const Peer& peer, std::vector<base::FilePath> paths
   impl_->cancel = false; impl_->decision = 0;
   ++impl_->state.session;
   impl_->state.incoming = false; impl_->state.peer_name = selected.name;
-  impl_->state.peer_device_type = peer.endpoint_info.empty() ? 0 : (static_cast<uint8_t>(peer.endpoint_info[0]) >> 1) & 7;
+  impl_->state.peer_device_type = EndpointDeviceType(peer.endpoint_info);
   impl_->state.code.clear(); impl_->state.files.clear();
   impl_->state.transferred = impl_->state.total = 0; impl_->state.diagnostic.clear();
   impl_->state.failure = Failure::kNone;
@@ -2692,7 +2693,7 @@ bool QuickShareService::SendBluetooth(const Peer& peer, std::vector<base::FilePa
   impl_->cancel = false; impl_->decision = 0;
   ++impl_->state.session;
   impl_->state.incoming = false; impl_->state.peer_name = peer.name;
-  impl_->state.peer_device_type = peer.endpoint_info.empty() ? 0 : (static_cast<uint8_t>(peer.endpoint_info[0]) >> 1) & 7;
+  impl_->state.peer_device_type = EndpointDeviceType(peer.endpoint_info);
   impl_->state.code.clear(); impl_->state.files.clear();
   impl_->state.transferred = impl_->state.total = 0; impl_->state.diagnostic.clear();
   impl_->state.failure = Failure::kNone; impl_->ResetProgress();

@@ -1,5 +1,6 @@
 // Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license.
+#include "crQuickShare/advertisement_codec.h"
 #include "crQuickShare/bluetooth_receiver.h"
 #include "build/build_config.h"
 #if BUILDFLAG(IS_WIN)
@@ -11,13 +12,11 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "base/base64url.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/rand_util.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
@@ -37,7 +36,6 @@ constexpr char kSharingUuid[] = "a82efa21-ae5c-3dde-9bbc-f16da7b16c5a";
 constexpr char kDiscoveryUuid[] = "0000fef3-0000-1000-8000-00805f9b34fb";
 constexpr char kSlotUuid[] = "00000000-0000-3000-8000-000000000000";
 #endif
-constexpr char kServiceHash[] = "\xfc\x9f\x5e";
 using Gatt = device::BluetoothLocalGattService;
 using Characteristic = device::BluetoothLocalGattCharacteristic;
 using Descriptor = device::BluetoothLocalGattDescriptor;
@@ -149,29 +147,10 @@ struct BluetoothReceiver::Impl : device::BluetoothAdapter::Observer,
     std::string mac;
     if (identity.id.size() != 4 || identity.endpoint_info.size() > 131 ||
         !base::HexStringToString(hex, &mac) || mac.size() != 6) return false;
-    // Nearby Connections V1 P2P_POINT_TO_POINT, regular advertisement.
-    // The public Sharing endpoint info is identical to the LAN advertisement.
-    std::string payload(1, '\x23');
-    payload.append(kServiceHash, 3); payload += identity.id;
-    payload += static_cast<char>(identity.endpoint_info.size()); payload += identity.endpoint_info;
-    payload += mac; payload.append(2, '\0');  // No UWB or WebRTC.
-    // BLE V2 medium/socket versions, non-fast payload and two-byte device token.
-    // No LE socket is offered; the connection payload supplies the RFCOMM MAC.
-    std::string bytes(1, '\x48'); bytes.append(kServiceHash, 3);
-    const uint32_t size = payload.size();
-    for (int shift : {24, 16, 8, 0}) bytes += static_cast<char>((size >> shift) & 255);
-    bytes += payload; bytes += base::RandBytesAsString(2);
+    const auto bytes = EncodeAdvertisement(identity, mac);
+    if (bytes.empty()) return false;
     value.assign(bytes.begin(), bytes.end());
-    // One GATT slot and no LE L2CAP socket. Windows sets the extended flag
-    // only after its full-data publisher starts. The aggregate hash is an
-    // opaque cache revision, rotated with this value.
-    std::string raw(15, '\0'); raw[0] = '\x41';
-    // Nearby BloomFilter's five MurmurHash3 bits for "NearbySharing".
-    for (unsigned bit : {57u, 56u, 5u, 28u, 33u}) raw[1 + bit / 8] |= 1u << (bit % 8);
-    raw.replace(11, 4, base::RandBytesAsString(4));
-    // Legacy base64url form: 20 bytes + service data (4), UUID (4), flags (3).
-    std::string encoded;
-    base::Base64UrlEncode(raw, base::Base64UrlEncodePolicy::OMIT_PADDING, &encoded);
+    const auto encoded = EncodeGattHeader();
     header.assign(encoded.begin(), encoded.end());
     return true;
   }

@@ -54,14 +54,10 @@ std::string AddressText(uint32_t address) {
       base::NumberToString((address >> 8) & 255) + "." + base::NumberToString(address & 255);
 }
 const char* EndpointNameStatus(const std::string& info) {
-  if (info.empty()) return "missing_or_invalid_endpoint_info";
-  if ((uint8_t(info[0]) >> 5) > 1) return "unsupported_version";
-  if (info[0] & 0x10) return "not_public";
-  if (info.size() < 18) return "missing_name_length";
-  const size_t length = uint8_t(info[17]);
-  if (!length) return "empty_name";
-  if (info.size() < 18 + length) return "truncated_name";
-  return EndpointName(info).empty() ? "invalid_name_encoding_or_characters" : "available";
+  const char* reason = nullptr;
+  auto parsed = ParseEndpointInfo(info, reason);
+  if (!parsed) return reason;
+  return parsed->name ? "available" : "not_public";
 }
 std::optional<uint32_t> ParseAddress(std::string_view text) {
   const auto parts = base::SplitStringPiece(text, ".", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
@@ -736,8 +732,10 @@ std::vector<Peer> MdnsDiscovery::Peers() const {
       const auto port = Get16(srv->record.data, 4);
       if (!port) continue;
       const auto info = EndpointInfo(txt->record);
-      const auto name = EndpointName(info);
-      if (name.empty() && (info.size() < 17 || (uint8_t(info[0]) >> 5) > 1 || !(info[0] & 0x10))) continue;
+      const char* info_error = nullptr;
+      const auto decoded_info = ParseEndpointInfo(info, info_error);
+      if (!decoded_info) continue;
+      const auto name = decoded_info->name.value_or("");
       const auto addresses = cache_.find(Key(index, srv->record.target, 1));
       if (addresses == cache_.end()) continue;
       for (const auto& address : addresses->second) {

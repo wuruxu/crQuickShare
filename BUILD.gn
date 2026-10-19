@@ -76,9 +76,75 @@ foreach(locale, cqs_locales) {
     ]
   }
 }
+# Compile portable upstream codecs without the ChromeOS service.
+# Keep third-party warning policy isolated from our own code.
+config("upstream_advertisement_includes") {
+  include_dirs = [
+    "//third_party/nearby/src",
+    "$root_gen_dir/third_party/nearby",
+  ]
+}
+source_set("upstream_advertisement_common") {
+  sources = [
+    "//third_party/nearby/src/internal/platform/bluetooth_utils.cc",
+    "//third_party/nearby/src/internal/platform/bluetooth_utils.h",
+    "//third_party/nearby/src/internal/platform/mac_address.cc",
+    "//third_party/nearby/src/internal/platform/mac_address.h",
+    "//third_party/nearby/src/internal/platform/byte_array.h",
+    "//third_party/nearby/src/internal/platform/stream_reader.cc",
+    "//third_party/nearby/src/internal/platform/stream_reader.h",
+    "//third_party/nearby/src/internal/platform/exception.h",
+    "//third_party/nearby/src/internal/platform/logging.h",
+    "//third_party/nearby/src/connections/implementation/mediums/ble_v2/ble_advertisement.cc",
+    "//third_party/nearby/src/connections/implementation/mediums/ble_v2/ble_advertisement.h",
+    "//third_party/nearby/src/connections/implementation/mediums/ble_v2/ble_advertisement_header.h",
+    "//third_party/nearby/src/connections/implementation/mediums/ble_v2/instant_on_lost_advertisement.cc",
+    "//third_party/nearby/src/connections/implementation/mediums/ble_v2/instant_on_lost_advertisement.h",
+    "//third_party/nearby/src/internal/platform/stream_writer.cc",
+    "//third_party/nearby/src/internal/platform/stream_writer.h",
+    "//third_party/nearby/src/connections/implementation/mediums/advertisements/data_element.cc",
+    "//third_party/nearby/src/connections/implementation/mediums/advertisements/data_element.h",
+    "//third_party/nearby/src/sharing/advertisement.cc",
+    "//third_party/nearby/src/sharing/advertisement.h",
+    "//third_party/nearby/src/sharing/common/nearby_share_enums.h",
+    "//third_party/nearby/src/sharing/internal/public/logging.h",
+  ]
+  public_configs = [ ":upstream_advertisement_includes" ]
+  defines = [ "NEARBY_CHROMIUM" ]
+  cflags = [ "-Wno-deprecated-declarations" ]
+  configs -= [ "//build/config/compiler:chromium_code" ]
+  configs += [ "//build/config/compiler:no_chromium_code" ]
+  if (enable_libcr_shared) {
+    public_deps = [ "//libcr:engine" ]
+  } else {
+    public_deps = [
+      "//base",
+      "//third_party/abseil-cpp:absl",
+    ]
+  }
+}
+# The Connections and BLE-medium codecs both use ble_advertisement.cc.
+# Separate targets give their object files distinct output directories.
+source_set("upstream_advertisement") {
+  sources = [
+    "//third_party/nearby/src/connections/implementation/ble_advertisement.cc",
+    "//third_party/nearby/src/connections/implementation/ble_advertisement.h",
+    "//third_party/nearby/src/connections/implementation/pcp.h",
+    "//third_party/nearby/src/connections/implementation/webrtc_state.h",
+  ]
+  public_deps = [ ":upstream_advertisement_common" ]
+  defines = [ "NEARBY_CHROMIUM" ]
+  cflags = [ "-Wno-deprecated-declarations" ]
+  configs -= [ "//build/config/compiler:chromium_code" ]
+  configs += [ "//build/config/compiler:no_chromium_code" ]
+}
 source_set("protocol") {
   sources = [
     "connection_listener.h",
+    "advertisement_codec.cc",
+    "advertisement_codec.h",
+    "endpoint_info_codec.cc",
+    "endpoint_info_codec.h",
     "file_storage.cc",
     "file_storage.h",
     "hotspot_upgrade.h",
@@ -128,6 +194,8 @@ source_set("protocol") {
       "//third_party/ukey2",
     ]
   }
+
+  deps += [ ":upstream_advertisement" ]
 
   # Uses the upstream protocol and crypto targets without ChromeOS platform
   # code.

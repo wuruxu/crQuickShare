@@ -27,6 +27,42 @@ and Wi-Fi upgrade modules for crFiles.
   Linux Wi-Fi backends talk directly to NetworkManager over D-Bus, without
   launching nmcli, pkexec, a helper process, or a second supplicant.
 
+## Protocol codec boundaries
+
+- `endpoint_info_codec` calls the vendored Nearby Sharing `Advertisement`
+  implementation for device information encoding and core decoding. The local
+  wrapper bounds input, rejects invalid UTF-8/control characters and malformed
+  TLV values, ignores a lone trailing extension byte like upstream, and retains the original bytes for
+  discovery association. Unknown TLVs remain accepted when their lengths are
+  valid; reserved device types map to unknown as in upstream.
+- `advertisement_codec` directly calls upstream BLE medium and Connections
+  `BleAdvertisement` parsers, `InstantOnLostAdvertisement::CreateFromBytes`, and
+  DCT `DataElement::FromStreamReader`. Local checks restrict service/strategy,
+  total size, unknown extension masks and trailing bytes. Large compact
+  advertisements are adapted to regular envelopes for upstream parsing: this
+  preserves public names beyond the upstream fast-info limit of 17 bytes and
+  avoids signed-char promotion of compact medium lengths >=128.
+- DCT semantic checks remain local: the upstream DCT parser requires a fixed
+  element order and does not check for an empty device-information value before
+  indexing it. Our wrapper accepts reordered/unknown elements, rejects duplicates,
+  and checks the Sharing hash, PSM and UTF-8 name. Its TLV decoding is upstream.
+- GATT header/bloom filtering and advertisement generation remain local. The
+  upstream GATT header implementation depends on Nearby feature flags and chooses
+  raw versus base64 representation through those flags; our receiver supports
+  both wire forms explicitly. Discovery scheduling and peer merging are unchanged.
+- Received Connections and Sharing frames use the existing protobuf/envelope
+  and session validation in `quick_share_service.cc`. ACK compatibility, consent,
+  manifests, chunk ordering and completion checks remain in that implementation.
+  Payload received ACKs are sent only for FILE attachments, not BYTES/text.
+  Unknown and repeated ACKs are ignored; an ACK for a current outgoing file
+  still requires its final chunk and all bytes to have been written.
+  File storage enforces component-based path safety and atomic commits; upgrade
+  credentials are validated by the platform backends.
+
+The portable upstream codecs are compiled by crQuickShare-local GN targets.
+The upstream offline frame validator is not part of these targets. No ChromeOS
+Nearby service is linked.
+
 ## Applications and platform scope
 
 | Component | Implemented capabilities |

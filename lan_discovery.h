@@ -6,9 +6,8 @@
 #include <string>
 #include <vector>
 #include "crQuickShare/quick_share_service.h"
+#include "crQuickShare/endpoint_info_codec.h"
 namespace crquickshare {
-std::string MakeEndpointInfo(const std::string& name);
-std::string EndpointName(const std::string& info);
 class LanDiscovery {
  public:
   virtual ~LanDiscovery();
