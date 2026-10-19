@@ -2,11 +2,21 @@
 // Use of this source code is governed by a BSD-style license.
 #ifndef CRQUICKSHARE_HOTSPOT_UPGRADE_H_
 #define CRQUICKSHARE_HOTSPOT_UPGRADE_H_
+#include <cstdint>
+#include <vector>
 #include <functional>
 #include <memory>
 #include <string>
 #include "crQuickShare/transport_channel.h"
 namespace crquickshare {
+struct WifiUpgradeInterface {
+  std::string name;  // Linux device name or Windows interface alias, UTF-8.
+  uint32_t mode = 0;  // NM wireless mode: 2 = station, 3 = AP; 0 on Windows.
+  bool available = false;
+  bool connected = false;
+};
+// Read-only Native Wi-Fi enumeration. Blocking; call on a worker.
+std::vector<WifiUpgradeInterface> GetWindowsWifiInterfaces();
 struct HotspotCredentials {
   std::string ssid, password, gateway;
   int port = 0;

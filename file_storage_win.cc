@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license.
 #include "crQuickShare/file_storage.h"
 #include <windows.h>
+#include <winternl.h>
 #include <algorithm>
 #include <map>
 #include <set>
@@ -10,6 +11,7 @@
 #include "base/compiler_specific.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/logging.h"
 #include "base/rand_util.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
@@ -20,6 +22,57 @@ namespace crquickshare {
 namespace {
 bool FailStorage(StorageError& error, const char* message, Failure failure = Failure::kStorage) {
   error.message = message; error.failure = failure; return false;
+}
+// FILE_RENAME_INFORMATION is not exposed by the user-mode Windows SDK.
+struct NativeRenameInformation {
+  BOOLEAN replace_if_exists;
+  HANDLE root_directory;
+  ULONG file_name_length;
+  WCHAR file_name[1];
+};
+bool RenameInParent(HANDLE directory, const base::FilePath& leaf, StorageError& error) {
+  // The user-mode SDK exposes only a subset of FILE_INFORMATION_CLASS. Use
+  // its 32-bit ABI representation so FileRenameInformation is not converted
+  // to an out-of-range C++ enum value.
+  static_assert(sizeof(FILE_INFORMATION_CLASS) == sizeof(ULONG));
+  using SetInformationFunction = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, ULONG);
+  using StatusToErrorFunction = ULONG(NTAPI*)(NTSTATUS);
+  const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  if (!ntdll) {
+    const DWORD system_error = GetLastError();
+    LOG(ERROR) << "crQuickShare: Receive commit failed; operation=load_ntdll; system_error=" << system_error;
+    return FailStorage(error, "Unable to commit received files");
+  }
+  const auto set_information = reinterpret_cast<SetInformationFunction>(GetProcAddress(ntdll, "NtSetInformationFile"));
+  if (!set_information) {
+    const DWORD system_error = GetLastError();
+    LOG(ERROR) << "crQuickShare: Receive commit failed; operation=resolve_rename; system_error=" << system_error;
+    return FailStorage(error, "Unable to commit received files");
+  }
+  const auto status_to_error = reinterpret_cast<StatusToErrorFunction>(GetProcAddress(ntdll, "RtlNtStatusToDosError"));
+  // A leaf name and NULL RootDirectory instruct the native API to rename in
+  // the existing parent. Unlike a full-path Win32 rename, this does not reopen
+  // the target parent for writing and conflict with our retained read-only
+  // sharing handles. Keep all ancestor locks and never overwrite a target.
+  const auto name_bytes = base::as_byte_span(leaf.value());
+  std::vector<uint8_t> data(sizeof(NativeRenameInformation) + name_bytes.size());
+  // SAFETY: data owns the complete structure and filename, is zero initialized,
+  // and is not resized before the synchronous native call consumes it.
+  auto* info = UNSAFE_BUFFERS(reinterpret_cast<NativeRenameInformation*>(data.data()));
+  info->replace_if_exists = FALSE; info->root_directory = nullptr;
+  info->file_name_length = static_cast<ULONG>(name_bytes.size());
+  base::span(data).subspan(offsetof(NativeRenameInformation, file_name), name_bytes.size()).copy_from(name_bytes);
+  IO_STATUS_BLOCK io_status{};
+  constexpr ULONG kFileRenameInformation = 10;
+  const NTSTATUS status = set_information(directory, &io_status, info, static_cast<ULONG>(data.size()), kFileRenameInformation);
+  if (status < 0) {
+    const ULONG system_error = status_to_error ? status_to_error(status) : ERROR_MR_MID_NOT_FOUND;
+    LOG(ERROR) << "crQuickShare: Receive commit failed; operation=rename_in_parent; system_error=" << system_error
+               << "; ntstatus=" << static_cast<ULONG>(status) << "; error_mapping_available=" << !!status_to_error;
+    error.no_space = system_error == ERROR_DISK_FULL || system_error == ERROR_HANDLE_DISK_FULL;
+    return FailStorage(error, "Unable to commit received files");
+  }
+  return true;
 }
 bool SafeWindowsName(const std::string& name) {
   if (!SafeTransferName(name) || name.back() == '.' || name.back() == ' ' || name.find_first_of(":*?\"<>|") != std::string::npos) return false;
@@ -175,18 +228,9 @@ bool WinReceiveBatch::Commit(StorageError& error) {
   if (!saved_.empty()) return FailStorage(error, "Receive batch already committed");
   for (const auto& [path, file] : files_) if (file.IsValid()) return FailStorage(error, "Receive file has not finished");
   directories_.clear();
-  const auto final = destination_.AppendASCII("Transfer-" + base::HexEncode(base::RandBytesAsString(8)));
-  // Rename the retained staging handle atomically; never overwrite a target.
-  const auto name_bytes = base::as_byte_span(final.value());
-  std::vector<uint8_t> data(sizeof(FILE_RENAME_INFO) + name_bytes.size());
-  // SAFETY: data owns the complete structure plus the variable-length filename.
-  // It is not resized before SetFileInformationByHandle consumes the buffer.
-  auto* info = UNSAFE_BUFFERS(reinterpret_cast<FILE_RENAME_INFO*>(data.data()));
-  info->ReplaceIfExists = FALSE; info->RootDirectory = nullptr;
-  info->FileNameLength = static_cast<DWORD>(name_bytes.size());
-  base::span(data).subspan(offsetof(FILE_RENAME_INFO, FileName), name_bytes.size()).copy_from(name_bytes);
-  if (!SetFileInformationByHandle(root_.get(), FileRenameInfo, info, static_cast<DWORD>(data.size())))
-    return FailStorage(error, "Unable to commit received files");
+  const auto leaf = base::FilePath::FromASCII("Transfer-" + base::HexEncode(base::RandBytesAsString(8)));
+  const auto final = destination_.Append(leaf);
+  if (!RenameInParent(root_.get(), leaf, error)) return false;
   staging_.Take(); saved_ = final; return true;
 }
 base::FilePath WinReceiveBatch::saved_directory() const { return saved_; }

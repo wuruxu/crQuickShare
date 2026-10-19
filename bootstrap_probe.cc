@@ -174,6 +174,8 @@ struct BootstrapProbe::Impl {
   std::unique_ptr<device::BluetoothDiscoverySession> classic_discovery;
   base::RepeatingTimer classic_poll;
   base::OneShotTimer classic_timeout;
+  base::OneShotTimer service_retry;
+  bool service_retry_used = false;
   std::shared_ptr<Pipe> pipe = std::make_shared<Pipe>();
   std::thread worker;
   HotspotConnector hotspot;
@@ -213,6 +215,7 @@ struct BootstrapProbe::Impl {
   void Stop(const char* reason) {
     if (stopped || !attempted) return;
     stopped = true; weak.InvalidateWeakPtrs(); deadline.Stop();
+    service_retry.Stop();
     classic_poll.Stop(); classic_timeout.Stop(); classic_discovery.reset();
     bool done;
     { std::lock_guard guard(pipe->mutex); pipe->closed = true; pipe->cancelled = true; done = pipe->done; pipe->changed.notify_all(); }
@@ -277,6 +280,38 @@ struct BootstrapProbe::Impl {
         }, weak.GetWeakPtr()),
         base::BindOnce(&Impl::Failed, weak.GetWeakPtr(), "Classic Bluetooth discovery could not start"));
   }
+  void ServiceConnectFailed(const std::string& message) {
+#if BUILDFLAG(IS_LINUX)
+    bool can_retry = false;
+    {
+      std::lock_guard guard(pipe->mutex);
+      can_retry = normal_transfer && !service_retry_used && !socket && !stopped &&
+          !pipe->closed && !pipe->done && !pipe->cancelled && !pipe->connected &&
+          message.find("br-connection-canceled") != std::string::npos;
+    }
+    if (can_retry) {
+      service_retry_used = true;
+      LOG(INFO) << "crQuickShare: Bootstrap service retry scheduled; attempt=2; delay_ms=500; reason=" << message;
+      service_retry.Start(FROM_HERE, base::Milliseconds(500),
+          base::BindOnce(&Impl::RetryService, weak.GetWeakPtr()));
+      return;
+    }
+#endif
+    Failed(message);
+  }
+  void RetryService() {
+    {
+      std::lock_guard guard(pipe->mutex);
+      if (pipe->closed || pipe->done || pipe->cancelled || pipe->connected) return;
+    }
+    if (!adapter || !adapter->IsPresent() || !adapter->IsPowered()) {
+      Failed("Bluetooth adapter unavailable during service retry");
+      return;
+    }
+    auto* target = adapter->GetDevice(classic_address);
+    if (!target) { Failed("Bluetooth device unavailable during service retry"); return; }
+    ConnectService(target);
+  }
   void ConnectService(device::BluetoothDevice* device) {
     if (!device) { Stop("device_unavailable"); return; }
     LOG(INFO) << "crQuickShare: Bootstrap service connect requested; service_uuid=" << kServiceUuid;
@@ -285,7 +320,7 @@ struct BootstrapProbe::Impl {
         base::BindOnce([](base::WeakPtr<Impl> self, scoped_refptr<device::BluetoothSocket> connected) {
           if (self) self->Connected(std::move(connected));
           else connected->Disconnect(base::DoNothing());
-        }, weak.GetWeakPtr()), base::BindOnce(&Impl::Failed, weak.GetWeakPtr()));
+        }, weak.GetWeakPtr()), base::BindOnce(&Impl::ServiceConnectFailed, weak.GetWeakPtr()));
   }
   void Observe(scoped_refptr<device::BluetoothAdapter> value, const Peer& peer) {
     if (endpoint.empty() || peer.id != endpoint || attempted || !value || !value->IsPowered()) return;

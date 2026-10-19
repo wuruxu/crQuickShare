@@ -8,6 +8,10 @@
 #include <tuple>
 #include "base/logging.h"
 #include "crQuickShare/platform_socket.h"
+#if BUILDFLAG(IS_WIN)
+#include <atomic>
+#include <iphlpapi.h>
+#endif
 
 namespace crquickshare {
 namespace {
@@ -26,10 +30,35 @@ class NativeMdnsNetwork final : public MdnsNetwork {
   int error() const override;
  private:
   platform::Socket fd_;
+#if BUILDFLAG(IS_WIN)
+  static void WINAPI InterfaceChanged(void* context, MIB_IPINTERFACE_ROW*, MIB_NOTIFICATION_TYPE) {
+    static_cast<NativeMdnsNetwork*>(context)->network_dirty_.store(true, std::memory_order_relaxed);
+  }
+  static void WINAPI AddressChanged(void* context, MIB_UNICASTIPADDRESS_ROW*, MIB_NOTIFICATION_TYPE) {
+    static_cast<NativeMdnsNetwork*>(context)->network_dirty_.store(true, std::memory_order_relaxed);
+  }
+  std::atomic<bool> network_dirty_{false};
+  HANDLE interface_notification_ = nullptr;
+  HANDLE address_notification_ = nullptr;
+#endif
 };
 NativeMdnsNetwork::NativeMdnsNetwork() {
+#if BUILDFLAG(IS_WIN)
+  const auto interface_error = NotifyIpInterfaceChange(AF_INET, &InterfaceChanged, this, FALSE, &interface_notification_);
+  const auto address_error = NotifyUnicastIpAddressChange(AF_INET, &AddressChanged, this, FALSE, &address_notification_);
+  if (interface_error != NO_ERROR || address_error != NO_ERROR)
+    LOG(WARNING) << "crQuickShare: mDNS network notification registration failed; interface_error="
+                 << interface_error << "; address_error=" << address_error << "; polling_fallback=1";
+#endif
 }
-NativeMdnsNetwork::~NativeMdnsNetwork() = default;
+NativeMdnsNetwork::~NativeMdnsNetwork() {
+#if BUILDFLAG(IS_WIN)
+  // Cancel from the owning discovery thread, never from a notification callback.
+  // Cancellation waits for callbacks while their atomic state is still alive.
+  if (interface_notification_) CancelMibChangeNotify2(interface_notification_);
+  if (address_notification_) CancelMibChangeNotify2(address_notification_);
+#endif
+}
 int NativeMdnsNetwork::error() const { return platform::Error(); }
 std::optional<std::vector<MdnsInterface>> NativeMdnsNetwork::Interfaces() {
     auto native = platform::Interfaces();
@@ -39,8 +68,11 @@ std::optional<std::vector<MdnsInterface>> NativeMdnsNetwork::Interfaces() {
     return result;
 }
 bool NativeMdnsNetwork::Changed() {
-  bool network_dirty = false;
-  return network_dirty;
+#if BUILDFLAG(IS_WIN)
+  return network_dirty_.exchange(false, std::memory_order_relaxed);
+#else
+  return false;
+#endif
 }
 bool NativeMdnsNetwork::Open(const std::vector<MdnsInterface>& interfaces) {
   Close();

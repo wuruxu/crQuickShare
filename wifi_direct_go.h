@@ -5,12 +5,7 @@
 #include "crQuickShare/hotspot_upgrade.h"
 #include <vector>
 namespace crquickshare {
-struct WifiDirectInterface {
-  std::string name;
-  uint32_t mode = 0;  // NM wireless mode: 2 = station, 3 = AP.
-  bool available = false;
-  bool connected = false;
-};
+using WifiDirectInterface = WifiUpgradeInterface;
 // Read-only NM enumeration. Blocking; call on a worker.
 std::vector<WifiDirectInterface> GetLinuxWifiDirectInterfaces();
 // Owns a dedicated P2P group, never the station connection. Worker only.

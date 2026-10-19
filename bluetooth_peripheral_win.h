@@ -7,8 +7,10 @@
 #include <cstdint>
 #include "base/functional/callback.h"
 namespace crquickshare {
-// UI-sequence Windows GATT server for the Nearby discovery slot. StaticValue
-// lets Windows answer read/blob requests, including offsets, without UI races.
+// UI-sequence Windows extended discovery publisher and legacy GATT server.
+// StaticValue lets Windows answer read/blob requests without UI races.
+// Either complete discovery advertisement is sufficient for readiness; partial
+// GATT advertising alone is not reported as successful discovery.
 class BluetoothPeripheralWin {
  public:
   BluetoothPeripheralWin();
@@ -17,6 +19,8 @@ class BluetoothPeripheralWin {
   void Advertise(const std::vector<uint8_t>& header, base::OnceCallback<void(bool)> ready);
   void Withdraw();
   void Stop();
+  // Drain retired advertisements on the UI sequence before WinRT teardown.
+  static void DrainPendingStops();
   bool ready() const;
   bool advertising() const;
  private:

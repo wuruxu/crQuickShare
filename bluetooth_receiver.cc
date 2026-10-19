@@ -76,9 +76,16 @@ struct BluetoothReceiver::Impl : device::BluetoothAdapter::Observer,
       device::BluetoothAdapterFactory::Get()->GetAdapter(base::BindOnce(&Impl::AdapterReady, lifetime.GetWeakPtr()));
   }
   ~Impl() override {
+#if BUILDFLAG(IS_WIN)
+    LOG(INFO) << "crQuickShare shutdown: stage=bluetooth_receiver; event=started; advertisement="
+              << !!advertisement << "; listener=" << !!listener;
+#endif
     lifetime.InvalidateWeakPtrs();
     Stop(); connection.Cancel();
     if (adapter) adapter->RemoveObserver(this);
+#if BUILDFLAG(IS_WIN)
+    LOG(INFO) << "crQuickShare shutdown: stage=bluetooth_receiver; event=finished";
+#endif
   }
   void AdapterReady(scoped_refptr<device::BluetoothAdapter> result) {
     adapter = std::move(result); adapter->AddObserver(this);
@@ -104,8 +111,14 @@ struct BluetoothReceiver::Impl : device::BluetoothAdapter::Observer,
     advertisement->RemoveObserver(this);
     auto released = std::move(advertisement);
     withdrawing = true;
-    released->Unregister(base::BindOnce(&Impl::Withdrawn, lifetime.GetWeakPtr(), released),
-        base::BindOnce([](base::WeakPtr<Impl> self, scoped_refptr<Advertisement> held, Advertisement::ErrorCode) {
+    LOG(INFO) << "crQuickShare: Bluetooth receiver advertisement unregister requested";
+    released->Unregister(base::BindOnce([](base::WeakPtr<Impl> self, scoped_refptr<Advertisement> held) {
+          LOG(INFO) << "crQuickShare: Bluetooth receiver advertisement unregister completed; success=1";
+          if (self) self->Withdrawn(std::move(held));
+        }, lifetime.GetWeakPtr(), released),
+        base::BindOnce([](base::WeakPtr<Impl> self, scoped_refptr<Advertisement> held, Advertisement::ErrorCode error) {
+          LOG(WARNING) << "crQuickShare: Bluetooth receiver advertisement unregister completed; success=0; error="
+                       << static_cast<int>(error);
           if (self) self->Withdrawn(std::move(held));
         }, lifetime.GetWeakPtr(), released));
   }
@@ -149,8 +162,9 @@ struct BluetoothReceiver::Impl : device::BluetoothAdapter::Observer,
     for (int shift : {24, 16, 8, 0}) bytes += static_cast<char>((size >> shift) & 255);
     bytes += payload; bytes += base::RandBytesAsString(2);
     value.assign(bytes.begin(), bytes.end());
-    // One GATT slot, no extended advertising or LE L2CAP socket. The header's
-    // aggregate hash is an opaque cache revision, rotated with this value.
+    // One GATT slot and no LE L2CAP socket. Windows sets the extended flag
+    // only after its full-data publisher starts. The aggregate hash is an
+    // opaque cache revision, rotated with this value.
     std::string raw(15, '\0'); raw[0] = '\x41';
     // Nearby BloomFilter's five MurmurHash3 bits for "NearbySharing".
     for (unsigned bit : {57u, 56u, 5u, 28u, 33u}) raw[1 + bit / 8] |= 1u << (bit % 8);
@@ -176,7 +190,10 @@ struct BluetoothReceiver::Impl : device::BluetoothAdapter::Observer,
 #endif
     if (!listener) {
 #if BUILDFLAG(IS_WIN)
-      if (!adapter->IsPeripheralRoleSupported()) { Failed("peripheral_role_unavailable"); return; }
+      // Extended discovery carries the RFCOMM address directly and can work
+      // even when connectable GATT advertising is unavailable.
+      LOG(INFO) << "crQuickShare: Windows receiver adapter; peripheral_role_supported="
+                << adapter->IsPeripheralRoleSupported();
 #endif
       if (!BuildAdvertisement()) { Failed("identity"); return; }
       starting = true;
@@ -218,7 +235,11 @@ struct BluetoothReceiver::Impl : device::BluetoothAdapter::Observer,
 #if BUILDFLAG(IS_WIN)
     peripheral.Prepare(value, base::BindOnce([](base::WeakPtr<Impl> self, bool success) {
       if (!self) return;
-      if (success) self->GattReady(); else self->Failed("gatt_register");
+      if (!success) { self->Failed("receiver_prepare"); return; }
+      self->starting = false;
+      LOG(INFO) << "crQuickShare: Windows Bluetooth receiver prepared";
+      self->Accept();
+      self->Reconcile();
     }, operations.GetWeakPtr()));
 #else
     gatt = adapter->CreateLocalGattService(device::BluetoothUUID(kDiscoveryUuid), true, this);

@@ -350,6 +350,33 @@ HotspotUpgradeResult Join(const std::string& requested_interface, const HotspotC
   return {std::move(network), std::make_unique<HotspotChannel>(std::move(connected.channel)), nullptr};
 }
 }  // namespace
+std::vector<WifiUpgradeInterface> GetWindowsWifiInterfaces() {
+  std::vector<WifiUpgradeInterface> result;
+  WlanApi api;
+  HANDLE client = nullptr;
+  DWORD version = 0;
+  if (!api.ready() || !Ok(api.open(2, nullptr, &version, &client), "enumeration_open")) return result;
+  WLAN_INTERFACE_INFO_LIST* list = nullptr;
+  if (Ok(api.enumerate(client, nullptr, &list), "enumeration_interfaces")) {
+    // WlanEnumInterfaces allocates dwNumberOfItems entries in this flexible array.
+    auto interfaces = UNSAFE_BUFFERS(base::span(list->InterfaceInfo, static_cast<size_t>(list->dwNumberOfItems)));
+    for (const auto& entry : interfaces) {
+      NET_LUID luid{};
+      WCHAR alias[IF_MAX_STRING_SIZE + 1]{};
+      if (ConvertInterfaceGuidToLuid(&entry.InterfaceGuid, &luid) != NO_ERROR ||
+          ConvertInterfaceLuidToAlias(&luid, alias, std::size(alias)) != NO_ERROR) continue;
+      WifiUpgradeInterface item;
+      item.name = base::WideToUTF8(Name(alias));
+      item.connected = entry.isState == wlan_interface_state_connected;
+      item.available = item.connected || entry.isState == wlan_interface_state_disconnected;
+      result.push_back(std::move(item));
+    }
+    api.free(list);
+  }
+  api.close(client, nullptr);
+  std::ranges::sort(result, {}, &WifiUpgradeInterface::name);
+  return result;
+}
 HotspotConnector MakeWindowsHotspotConnector(const std::string& requested_interface) {
   return [requested_interface](const HotspotCredentials& credentials, base::TimeTicks deadline, const KeepGoing& active) {
     return Join(requested_interface, credentials, deadline, active);
