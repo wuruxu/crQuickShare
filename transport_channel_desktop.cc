@@ -5,6 +5,11 @@
 #include "crQuickShare/platform_socket.h"
 #include <algorithm>
 #include <utility>
+#include "net/base/ip_endpoint.h"
+#if BUILDFLAG(IS_WIN)
+#include <windows.h>
+#include <iphlpapi.h>
+#endif
 
 namespace crquickshare {
 namespace {
@@ -68,33 +73,52 @@ ChannelConnectResult ConnectTcpChannel(const std::string& ip, uint16_t port,
                                       const std::string& local_address, unsigned interface_index) {
   if (!active()) return {nullptr, "cancelled", 0};
   if (base::TimeTicks::Now() >= deadline) return {nullptr, "timed_out", 0};
-  auto socket = platform::Open(SOCK_STREAM);
+  const auto peer = net::IPAddress::FromIPLiteral(ip);
+  if (!peer || ip.find('\0') != std::string::npos || peer->IsIPv4MappedIPv6())
+    return {nullptr, "invalid_address", 0};
+  const bool ipv6 = peer->IsIPv6();
+  if (ipv6 && peer->IsLinkLocal() && !interface_index) return {nullptr, "invalid_source_route", 0};
+  const net::IPEndPoint endpoint(*peer, port, ipv6 && peer->IsLinkLocal() ?
+      std::optional<uint32_t>(interface_index) : std::nullopt);
+  sockaddr_storage address{}; platform::Length address_size = sizeof(address);
+  if (!endpoint.ToSockAddr(reinterpret_cast<sockaddr*>(&address), &address_size))
+    return {nullptr, "invalid_address", 0};
+  auto socket = platform::Open(SOCK_STREAM, ipv6 ? AF_INET6 : AF_INET);
   if (!socket.is_valid()) return {nullptr, "socket_failed", platform::Error()};
-  sockaddr_in address{}; address.sin_family = AF_INET; address.sin_port = htons(port);
-  if (inet_pton(AF_INET, ip.c_str(), &address.sin_addr) != 1) return {nullptr, "invalid_address", 0};
   if (interface_index || !local_address.empty()) {
-    sockaddr_in source{}; source.sin_family = AF_INET;
-    if (!interface_index || inet_pton(AF_INET, local_address.c_str(), &source.sin_addr) != 1)
+    const auto source_ip = net::IPAddress::FromIPLiteral(local_address);
+    if (!interface_index || !source_ip || local_address.find('\0') != std::string::npos || source_ip->size() != peer->size())
       return {nullptr, "invalid_source_route", 0};
-    const auto links = platform::Interfaces();
-    if (!links) return {nullptr, "interface_check_failed", platform::Error()};
-    if (std::ranges::none_of(*links, [&](const auto& link) {
-          return link.index == interface_index && link.address.s_addr == source.sin_addr.s_addr &&
-                 ((address.sin_addr.s_addr ^ source.sin_addr.s_addr) & link.mask.s_addr) == 0;
-        })) return {nullptr, "source_route_unavailable", 0};
+    const net::IPEndPoint source_endpoint(*source_ip, 0, ipv6 && source_ip->IsLinkLocal() ?
+        std::optional<uint32_t>(interface_index) : std::nullopt);
+    sockaddr_storage source{}; platform::Length source_size = sizeof(source);
+    if (!source_endpoint.ToSockAddr(reinterpret_cast<sockaddr*>(&source), &source_size))
+      return {nullptr, "invalid_source_route", 0};
+    if (ipv6) {
+      if (!IsTcpRouteAvailable(ip, local_address, interface_index)) return {nullptr, "source_route_unavailable", 0};
+    } else {
+      const auto links = platform::Interfaces();
+      if (!links) return {nullptr, "interface_check_failed", platform::Error()};
+      const auto& remote = reinterpret_cast<const sockaddr_in&>(address);
+      const auto& local = reinterpret_cast<const sockaddr_in&>(source);
+      if (std::ranges::none_of(*links, [&](const auto& link) {
+            return link.index == interface_index && link.address.s_addr == local.sin_addr.s_addr &&
+                   ((remote.sin_addr.s_addr ^ local.sin_addr.s_addr) & link.mask.s_addr) == 0;
+          })) return {nullptr, "source_route_unavailable", 0};
+    }
 #if BUILDFLAG(IS_WIN)
-    const uint32_t index = htonl(interface_index);
-    constexpr int option = IP_UNICAST_IF;
+    const uint32_t index = ipv6 ? interface_index : htonl(interface_index);
+    const int option = ipv6 ? IPV6_UNICAST_IF : IP_UNICAST_IF;
 #else
     const uint32_t index = interface_index;
-    constexpr int option = IP_BOUND_IF;
+    const int option = ipv6 ? IPV6_BOUND_IF : IP_BOUND_IF;
 #endif
-    if (platform::SetOption(socket.get(), IPPROTO_IP, option, &index, sizeof(index)))
+    if (platform::SetOption(socket.get(), ipv6 ? IPPROTO_IPV6 : IPPROTO_IP, option, &index, sizeof(index)))
       return {nullptr, "interface_bind_failed", platform::Error()};
-    if (bind(socket.get(), reinterpret_cast<sockaddr*>(&source), sizeof(source)))
+    if (bind(socket.get(), reinterpret_cast<sockaddr*>(&source), source_size))
       return {nullptr, "source_bind_failed", platform::Error()};
   }
-  bool connected = connect(socket.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0;
+  bool connected = connect(socket.get(), reinterpret_cast<sockaddr*>(&address), address_size) == 0;
   if (!connected && !platform::Pending(platform::Error())) return {nullptr, "connect_failed", platform::Error()};
   while (!connected && active() && base::TimeTicks::Now() < deadline) {
     platform::PollFd descriptor{socket.get(), POLLOUT, 0};
@@ -108,7 +132,7 @@ ChannelConnectResult ConnectTcpChannel(const std::string& ip, uint16_t port,
     connected = true;
   }
   if (!active()) return {nullptr, "cancelled", 0};
-  if (!connected) return {nullptr, "timed_out", 0};
+  if (!connected || base::TimeTicks::Now() >= deadline) return {nullptr, "timed_out", 0};
   auto channel = AdoptTcpChannel(std::move(socket));
   if (!channel) return {nullptr, "socket_failed", platform::Error()};
   return {std::move(channel), "connected", 0};
@@ -154,6 +178,41 @@ ListenerResult CreateConnectionListener() {
   platform::Length size = sizeof(address);
   if (getsockname(socket.get(), reinterpret_cast<sockaddr*>(&address), &size))
     return {nullptr, "listener_address_failed", platform::Error()};
+  return {std::make_unique<TcpListener>(std::move(socket), ntohs(address.sin_port)), nullptr, 0};
+}
+bool IsPhysicalLanInterface(const std::string& name, unsigned interface_index) {
+#if BUILDFLAG(IS_WIN)
+  MIB_IF_ROW2 row{};
+  row.InterfaceIndex = interface_index;
+  return interface_index && GetIfEntry2(&row) == NO_ERROR &&
+      row.OperStatus == IfOperStatusUp && row.InterfaceAndOperStatusFlags.HardwareInterface &&
+      !row.InterfaceAndOperStatusFlags.FilterInterface && !row.InterfaceAndOperStatusFlags.EndPointInterface;
+#else
+  return interface_index && name.starts_with("en");
+#endif
+}
+ListenerResult CreateBoundLanUpgradeListener(const TcpRoute& route) {
+  const auto source = net::IPAddress::FromIPLiteral(route.local_address);
+  if (!source || !source->IsIPv4() || !route.interface_index)
+    return {nullptr, "invalid_lan_listener_route", 0};
+  auto socket = platform::Open(SOCK_STREAM);
+  if (!socket.is_valid()) return {nullptr, "lan_listener_setup_failed", platform::Error()};
+  sockaddr_in address{};
+  platform::Length size = sizeof(address);
+  if (!net::IPEndPoint(*source, 0).ToSockAddr(reinterpret_cast<sockaddr*>(&address), &size))
+    return {nullptr, "invalid_lan_listener_route", 0};
+#if BUILDFLAG(IS_WIN)
+  const uint32_t index = htonl(route.interface_index);
+  const int option = IP_UNICAST_IF;
+#else
+  const uint32_t index = route.interface_index;
+  const int option = IP_BOUND_IF;
+#endif
+  if (platform::SetOption(socket.get(), IPPROTO_IP, option, &index, sizeof(index)) ||
+      bind(socket.get(), reinterpret_cast<sockaddr*>(&address), size) || listen(socket.get(), 4))
+    return {nullptr, "lan_listener_bind_failed", platform::Error()};
+  if (getsockname(socket.get(), reinterpret_cast<sockaddr*>(&address), &size))
+    return {nullptr, "lan_listener_address_failed", platform::Error()};
   return {std::make_unique<TcpListener>(std::move(socket), ntohs(address.sin_port)), nullptr, 0};
 }
 }  // namespace crquickshare

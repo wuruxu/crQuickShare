@@ -109,7 +109,10 @@ class QuickShareService {
   bool StopReceivingIfIdle();
   void RefreshDiscovery();
   // Configure only while idle. GO offers and peer-provided client paths are separate roles.
-  void SetWifiDirectClientConnector(WifiDirectClientConnector connector);
+  // A client preference requests Direct alone once before the usual candidate
+  // list. A valid peer offer can still choose another available medium.
+  void SetWifiDirectClientConnector(WifiDirectClientConnector connector,
+                                    bool prefer_direct = false);
   void SetWifiDirectGoFactory(WifiDirectGoFactory factory, bool prefer_direct = false);
   // Idle-only diagnostic preference for outgoing Bluetooth upgrade requests.
   // Requires a hotspot connector; does not override direct LAN connections.

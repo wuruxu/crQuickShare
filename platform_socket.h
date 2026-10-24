@@ -43,7 +43,7 @@ class Socket {
  private:
   Handle handle_ = kInvalid;
 };
-Socket Open(int type);
+Socket Open(int type, int family = AF_INET);
 bool Configure(Handle socket);
 int Error();
 bool Pending(int error);

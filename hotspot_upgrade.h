@@ -22,6 +22,8 @@ struct HotspotCredentials {
   int port = 0;
   // Protocol value may be a frequency in MHz or a band identifier.
   int frequency = -1;
+  // Optional Direct GO IPv6 link-local address, 16 bytes in network order.
+  std::string ipv6_address = {};
 };
 // Explicit worker-only cleanup after closing the upgraded channel.
 // Destruction is only a short best-effort fallback.
@@ -46,5 +48,9 @@ HotspotConnector MakeLinuxHotspotConnector(const std::string& interface);
 // an explicit interface is a Windows interface alias (for example "Wi-Fi").
 // Factory creation does not query or change networking.
 HotspotConnector MakeWindowsHotspotConnector(const std::string& requested_interface);
+// macOS CoreWLAN station client. Empty selects the sole Wi-Fi radio; an explicit
+// interface is its BSD name (for example "en0"). RequestCoreWlanAccess() must
+// first run on the UI sequence. Factory creation does not change networking.
+HotspotConnector MakeMacHotspotConnector(const std::string& requested_interface);
 }  // namespace crquickshare
 #endif

@@ -82,9 +82,9 @@ bool Configure(Handle socket) {
       fcntl(socket, F_SETFD, FD_CLOEXEC) == 0 && setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes)) == 0;
 #endif
 }
-Socket Open(int type) {
+Socket Open(int type, int family) {
   if (!Initialize()) return {};
-  Socket socket(::socket(AF_INET, type, 0));
+  Socket socket(::socket(family, type, 0));
   if (!socket.is_valid() || !Configure(socket.get())) return {};
   return socket;
 }

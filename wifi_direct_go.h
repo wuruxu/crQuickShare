@@ -18,9 +18,15 @@ class WifiDirectGroup : public UpgradeNetwork {
 };
 using WifiDirectGoFactory = std::function<std::unique_ptr<WifiDirectGroup>(
     base::TimeTicks, const std::function<bool()>&)>;
-// Credential-based client on an independent NM P2P interface. No STA changes.
 using WifiDirectClientConnector = HotspotConnector;
+// Credential-based client on an independent NM P2P interface. No STA changes.
 WifiDirectClientConnector MakeLinuxWifiDirectClientConnector(
+    const std::string& interface_name);
+// macOS legacy station client for a phone-owned group that accepts ordinary
+// Wi-Fi clients. Uses CoreWLAN; can replace the selected radio's station link.
+// Requires RequestCoreWlanAccess() on the UI sequence before joining. Empty
+// interface selects the sole Wi-Fi radio. No network changes during creation.
+WifiDirectClientConnector MakeMacWifiDirectClientConnector(
     const std::string& interface_name);
 // Explicit opt-in. NetworkManager owns addresses/DHCP/group lifetime.
 WifiDirectGoFactory MakeLinuxWifiDirectGoFactory(

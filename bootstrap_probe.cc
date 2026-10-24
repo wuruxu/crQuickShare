@@ -5,6 +5,8 @@
 #if BUILDFLAG(IS_WIN)
 #include "device/bluetooth/bluetooth_socket_win.h"
 #include "device/bluetooth/bluetooth_socket_thread.h"
+#elif BUILDFLAG(IS_MAC)
+#include "crQuickShare/bluetooth_connector_mac.h"
 #endif
 #include <algorithm>
 #include <condition_variable>
@@ -43,6 +45,8 @@ struct Pipe {
   bool close_requested = false;
   bool setup_required = false, setup_requested = false;
   bool gatt_released = false, connected = false;
+  // Protected by mutex; finalized on the UI sequence before gatt_released.
+  bool reconnect_bluetooth = false;
   base::TimeTicks connect_started;
   uint64_t sent_bytes = 0;
   // Installed on the UI sequence before publishing this pipe to the worker.
@@ -89,7 +93,6 @@ TransportChannel::SetupResult ProbeChannel::PrepareConnection(
   }
   pipe_->Wake();
   const auto started = base::TimeTicks::Now();
-  const auto overall_deadline = started + base::Seconds(45);
   bool connecting = false;
   stage("gatt_release_wait");
   while (active()) {
@@ -99,13 +102,16 @@ TransportChannel::SetupResult ProbeChannel::PrepareConnection(
           "Bluetooth connection setup stopped" : pipe_->connection_error};
     if (pipe_->gatt_released && !connecting) {
       connecting = true;
+      const bool reconnect = pipe_->reconnect_bluetooth;
       guard.unlock();
-      stage("bluetooth_connect");
+      stage(reconnect ? "bluetooth_reconnect" : "bluetooth_connect");
       continue;
     }
     if (pipe_->connected) return {};
+    const auto connect_timeout = base::Seconds(pipe_->reconnect_bluetooth ? 60 : 20);
+    const auto overall_deadline = started + base::Seconds(pipe_->reconnect_bluetooth ? 85 : 45);
     const auto until = std::min(overall_deadline, connecting ?
-        pipe_->connect_started + base::Seconds(20) : started + base::Seconds(25));
+        pipe_->connect_started + connect_timeout : started + base::Seconds(25));
     if (base::TimeTicks::Now() >= until) {
       const std::string error = connecting ? "Bluetooth connection timed out" :
           "Bluetooth GATT release timed out";
@@ -180,6 +186,7 @@ struct BootstrapProbe::Impl {
   std::thread worker;
   HotspotConnector hotspot;
   bool normal_transfer = false;
+  bool reconnect_bluetooth = false, connection_failed = false;
   scoped_refptr<device::BluetoothSocket> pending_socket;
   std::optional<Peer> pending_peer;
   bool connection_ready = true;
@@ -244,6 +251,7 @@ struct BootstrapProbe::Impl {
     LOG(WARNING) << "crQuickShare: Bootstrap Bluetooth error; connected=" << bool(socket) << "; reason=" << message;
     if (!socket) {
       std::lock_guard guard(pipe->mutex);
+      connection_failed = normal_transfer && !pipe->connected && !pipe->cancelled && !pipe->done;
       pipe->connection_error = "Bluetooth connection failed: " + message;
     }
     Stop(socket ? "bluetooth_io_failed" : "bluetooth_connect_failed");
@@ -336,7 +344,7 @@ struct BootstrapProbe::Impl {
     classic_address = peer.classic_bluetooth_address;
     LOG(INFO) << "crQuickShare: Bootstrap connection entry; endpoint_id=" << base::HexEncode(peer.id)
               << "; classic_address=" << peer.classic_bluetooth_address << "; address_source=protocol";
-    deadline.Start(FROM_HERE, base::Seconds(hotspot ? 120 : 45), base::BindOnce(&Impl::Stop, weak.GetWeakPtr(), "deadline"));
+    deadline.Start(FROM_HERE, base::Seconds(reconnect_bluetooth ? 60 : hotspot ? 120 : 45), base::BindOnce(&Impl::Stop, weak.GetWeakPtr(), "deadline"));
 #if BUILDFLAG(IS_WIN)
     auto connecting = device::BluetoothSocketWin::CreateBluetoothSocket(
         base::SingleThreadTaskRunner::GetCurrentDefault(), device::BluetoothSocketThread::Get());
@@ -347,6 +355,16 @@ struct BootstrapProbe::Impl {
           // do not disconnect it twice.
           if (self) { self->pending_socket.reset(); self->Connected(std::move(connected)); }
         }, weak.GetWeakPtr(), connecting), base::BindOnce(&Impl::Failed, weak.GetWeakPtr()));
+#elif BUILDFLAG(IS_MAC)
+    auto connecting = CreateMacBluetoothSocket();
+    pending_socket = connecting;
+    LOG(INFO) << "crQuickShare: macOS bootstrap service connect requested; address_source=protocol; service_uuid=" << kServiceUuid;
+    ConnectMacBluetoothSocket(connecting, peer.classic_bluetooth_address, device::BluetoothUUID(kServiceUuid),
+        base::BindOnce([](base::WeakPtr<Impl> self, scoped_refptr<device::BluetoothSocket> connected) {
+          // Stop() cancels SDP/channel setup on pending_socket before
+          // invalidating this result; callbacks never reopen a cancelled link.
+          if (self) { self->pending_socket.reset(); self->Connected(std::move(connected)); }
+        }, weak.GetWeakPtr(), connecting), base::BindOnce(&Impl::Failed, weak.GetWeakPtr()), reconnect_bluetooth);
 #else
     if (auto* device = adapter->GetDevice(peer.classic_bluetooth_address)) ConnectService(device);
     else adapter->ConnectDevice(peer.classic_bluetooth_address, std::nullopt,
@@ -396,14 +414,30 @@ struct BootstrapProbe::Impl {
       { std::lock_guard guard(pipe->mutex); start_connect = pipe->setup_requested && !pipe->closed; }
       if (start_connect && connection_ready) {
         if (!adapter || !adapter->IsPowered()) { Stop("bluetooth_unavailable"); return; }
+#if BUILDFLAG(IS_MAC)
+        // The macOS 27 bridge installs peer channel callbacks during a real
+        // connection transition. Decide only after source preflight and GATT
+        // release, and never apply this to the discovery-only probe.
+        const bool prepare_connection = normal_transfer && !reconnect_bluetooth &&
+            ShouldReconnectMacBluetoothBeforeSend(pending_peer->classic_bluetooth_address);
+#endif
         auto peer = std::move(*pending_peer); pending_peer.reset();
         // Source preflight has completed; handshake waits for this socket.
         {
           std::lock_guard guard(pipe->mutex);
+          if (pipe->closed || pipe->done) return;
+#if BUILDFLAG(IS_MAC)
+          if (prepare_connection) reconnect_bluetooth = true;
+#endif
+          pipe->reconnect_bluetooth = reconnect_bluetooth;
           pipe->gatt_released = true;
           pipe->connect_started = base::TimeTicks::Now();
           pipe->changed.notify_all();
         }
+#if BUILDFLAG(IS_MAC)
+        if (prepare_connection)
+          LOG(INFO) << "crQuickShare: macOS Bluetooth initial connection preparation; reconnect=1; attempt_limit=1";
+#endif
         attempted = false;
         Observe(adapter, peer);
       }
@@ -499,6 +533,20 @@ bool BootstrapProbe::CanProbe(const Peer& peer) const {
       !peer.name.empty() && !peer.classic_bluetooth_address.empty();
 }
 bool BootstrapProbe::active() const { return impl_->attempted && !impl_->stopped; }
+bool BootstrapProbe::CanRetryWithBluetoothReconnect() const {
+#if BUILDFLAG(IS_MAC)
+  return impl_->stopped && impl_->normal_transfer && impl_->connection_failed && !impl_->reconnect_bluetooth;
+#else
+  return false;
+#endif
+}
+bool BootstrapProbe::reconnecting_bluetooth() const {
+#if BUILDFLAG(IS_MAC)
+  return active() && impl_->reconnect_bluetooth && !impl_->socket;
+#else
+  return false;
+#endif
+}
 bool BootstrapProbe::Receive(scoped_refptr<device::BluetoothSocket> socket, QuickShareService& service, HotspotConnector hotspot) {
   if (!socket) return false;
   if (active()) { socket->Disconnect(base::DoNothing()); return false; }
@@ -520,13 +568,21 @@ bool BootstrapProbe::Receive(scoped_refptr<device::BluetoothSocket> socket, Quic
 }
 bool BootstrapProbe::Send(scoped_refptr<device::BluetoothAdapter> adapter, const Peer& peer,
                           QuickShareService& service, std::vector<base::FilePath> paths,
-                          HotspotConnector hotspot, std::function<void(base::OnceClosure)> when_connection_ready) {
+                          HotspotConnector hotspot, std::function<void(base::OnceClosure)> when_connection_ready,
+                          bool reconnect_bluetooth) {
   const auto reject = [](const char* reason) {
     LOG(WARNING) << "crQuickShare: Send rejected before session; component=bluetooth_sender; reason=" << reason;
     return false;
   };
   if (active()) return reject("sender_busy");
+#if !BUILDFLAG(IS_MAC)
+  if (reconnect_bluetooth) return reject("bluetooth_recovery_unsupported");
+#endif
   if (!adapter) return reject("adapter_missing");
+#if BUILDFLAG(IS_MAC)
+  if (adapter->GetOsPermissionStatus() != device::BluetoothAdapter::PermissionStatus::kAllowed)
+    return reject("bluetooth_permission_unavailable");
+#endif
   if (!adapter->IsPresent()) return reject("adapter_not_present");
   if (!adapter->IsPowered()) return reject("adapter_not_powered");
   if (!peer.ble_only || peer.id.size() != 4 || peer.name.empty() || peer.classic_bluetooth_address.empty())
@@ -534,8 +590,10 @@ bool BootstrapProbe::Send(scoped_refptr<device::BluetoothAdapter> adapter, const
   impl_ = std::make_unique<Impl>(false);
   impl_->endpoint = peer.id;
   impl_->hotspot = std::move(hotspot);
+  impl_->reconnect_bluetooth = reconnect_bluetooth;
   auto shared = impl_->pipe;
   shared->setup_required = true;
+  shared->reconnect_bluetooth = reconnect_bluetooth;
   if (!service.SendBluetooth(peer, std::move(paths), std::make_unique<ProbeChannel>(shared),
       [shared] { std::lock_guard guard(shared->mutex); return shared->sent_bytes; }, impl_->hotspot,
       [shared] { std::lock_guard guard(shared->mutex); return shared->cancelled; },

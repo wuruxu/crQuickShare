@@ -9,7 +9,7 @@
 #include "crQuickShare/quick_share_service.h"
 namespace device { class BluetoothAdapter; }
 namespace crquickshare {
-// Linux, UI sequence only. Discovery hints only, never authorization or a
+// Desktop, UI sequence only. Discovery hints only, never authorization or a
 // file transport. Reads advertised GATT metadata without pairing or powering
 // on the radio; it does not write characteristics or subscribe to notifications.
 class BleDiscovery {

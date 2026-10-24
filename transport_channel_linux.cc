@@ -3,6 +3,7 @@
 #include "crQuickShare/transport_channel.h"
 #include "crQuickShare/connection_listener.h"
 #include "base/files/scoped_file.h"
+#include "base/files/file_util.h"
 #include <arpa/inet.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -12,6 +13,7 @@
 #include <sys/socket.h>
 #include <algorithm>
 #include <utility>
+#include "net/base/ip_endpoint.h"
 
 namespace crquickshare {
 namespace {
@@ -71,34 +73,54 @@ ChannelConnectResult ConnectTcpChannel(const std::string& ip, uint16_t port,
                                       const std::string& local_address, unsigned interface_index) {
   if (!active()) return {nullptr, "cancelled", 0};
   if (base::TimeTicks::Now() >= deadline) return {nullptr, "timed_out", 0};
-  base::ScopedFD socket(::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
+  const auto peer = net::IPAddress::FromIPLiteral(ip);
+  if (!peer || ip.find('\0') != std::string::npos || peer->IsIPv4MappedIPv6())
+    return {nullptr, "invalid_address", 0};
+  const bool ipv6 = peer->IsIPv6();
+  if (ipv6 && peer->IsLinkLocal() && !interface_index) return {nullptr, "invalid_source_route", 0};
+  const net::IPEndPoint endpoint(*peer, port, ipv6 && peer->IsLinkLocal() ?
+      std::optional<uint32_t>(interface_index) : std::nullopt);
+  sockaddr_storage address{}; socklen_t address_size = sizeof(address);
+  if (!endpoint.ToSockAddr(reinterpret_cast<sockaddr*>(&address), &address_size))
+    return {nullptr, "invalid_address", 0};
+  base::ScopedFD socket(::socket(ipv6 ? AF_INET6 : AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
   if (!socket.is_valid()) return {nullptr, "socket_failed", errno};
-  sockaddr_in address{}; address.sin_family = AF_INET; address.sin_port = htons(port);
-  if (inet_pton(AF_INET, ip.c_str(), &address.sin_addr) != 1) return {nullptr, "invalid_address", 0};
   if (interface_index || !local_address.empty()) {
-    sockaddr_in source{}; source.sin_family = AF_INET;
-    if (!interface_index || inet_pton(AF_INET, local_address.c_str(), &source.sin_addr) != 1)
+    const auto source_ip = net::IPAddress::FromIPLiteral(local_address);
+    if (!interface_index || !source_ip || local_address.find('\0') != std::string::npos || source_ip->size() != peer->size())
       return {nullptr, "invalid_source_route", 0};
-    ifaddrs* raw = nullptr;
-    if (getifaddrs(&raw)) return {nullptr, "interface_check_failed", errno};
-    bool present = false;
-    for (auto* link = raw; link; link = link->ifa_next) {
-      if (link->ifa_addr && link->ifa_netmask && link->ifa_addr->sa_family == AF_INET && (link->ifa_flags & IFF_UP) &&
-          if_nametoindex(link->ifa_name) == interface_index &&
-          reinterpret_cast<const sockaddr_in*>(link->ifa_addr)->sin_addr.s_addr == source.sin_addr.s_addr &&
-          ((address.sin_addr.s_addr ^ source.sin_addr.s_addr) &
-           reinterpret_cast<const sockaddr_in*>(link->ifa_netmask)->sin_addr.s_addr) == 0)
-        present = true;
+    const net::IPEndPoint source_endpoint(*source_ip, 0, ipv6 && source_ip->IsLinkLocal() ?
+        std::optional<uint32_t>(interface_index) : std::nullopt);
+    sockaddr_storage source{}; socklen_t source_size = sizeof(source);
+    if (!source_endpoint.ToSockAddr(reinterpret_cast<sockaddr*>(&source), &source_size))
+      return {nullptr, "invalid_source_route", 0};
+    if (ipv6) {
+      if (!IsTcpRouteAvailable(ip, local_address, interface_index)) return {nullptr, "source_route_unavailable", 0};
+    } else {
+      const auto& remote = reinterpret_cast<const sockaddr_in&>(address);
+      const auto& local = reinterpret_cast<const sockaddr_in&>(source);
+      ifaddrs* raw = nullptr;
+      if (getifaddrs(&raw)) return {nullptr, "interface_check_failed", errno};
+      bool present = false;
+      for (auto* link = raw; link; link = link->ifa_next) {
+        if (link->ifa_addr && link->ifa_netmask && link->ifa_addr->sa_family == AF_INET && (link->ifa_flags & IFF_UP) &&
+            if_nametoindex(link->ifa_name) == interface_index &&
+            reinterpret_cast<const sockaddr_in*>(link->ifa_addr)->sin_addr.s_addr == local.sin_addr.s_addr &&
+            ((remote.sin_addr.s_addr ^ local.sin_addr.s_addr) &
+             reinterpret_cast<const sockaddr_in*>(link->ifa_netmask)->sin_addr.s_addr) == 0)
+          present = true;
+      }
+      freeifaddrs(raw);
+      if (!present) return {nullptr, "source_route_unavailable", 0};
     }
-    freeifaddrs(raw);
-    if (!present) return {nullptr, "source_route_unavailable", 0};
     const uint32_t index = htonl(interface_index);
-    if (setsockopt(socket.get(), IPPROTO_IP, IP_UNICAST_IF, &index, sizeof(index)))
+    if (setsockopt(socket.get(), ipv6 ? IPPROTO_IPV6 : IPPROTO_IP,
+        ipv6 ? IPV6_UNICAST_IF : IP_UNICAST_IF, &index, sizeof(index)))
       return {nullptr, "interface_bind_failed", errno};
-    if (bind(socket.get(), reinterpret_cast<sockaddr*>(&source), sizeof(source)))
+    if (bind(socket.get(), reinterpret_cast<sockaddr*>(&source), source_size))
       return {nullptr, "source_bind_failed", errno};
   }
-  bool connected = connect(socket.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0;
+  bool connected = connect(socket.get(), reinterpret_cast<sockaddr*>(&address), address_size) == 0;
   if (!connected && errno != EINPROGRESS) return {nullptr, "connect_failed", errno};
   while (!connected && active() && base::TimeTicks::Now() < deadline) {
     pollfd descriptor{socket.get(), POLLOUT, 0};
@@ -113,7 +135,7 @@ ChannelConnectResult ConnectTcpChannel(const std::string& ip, uint16_t port,
     connected = true;
   }
   if (!active()) return {nullptr, "cancelled", 0};
-  if (!connected) return {nullptr, "timed_out", 0};
+  if (!connected || base::TimeTicks::Now() >= deadline) return {nullptr, "timed_out", 0};
   auto channel = AdoptTcpChannel(std::move(socket));
   if (!channel) return {nullptr, "socket_failed", errno};
   return {std::move(channel), "connected", 0};
@@ -159,6 +181,34 @@ ListenerResult CreateConnectionListener() {
   socklen_t size = sizeof(address);
   if (getsockname(socket.get(), reinterpret_cast<sockaddr*>(&address), &size))
     return {nullptr, "listener_address_failed", errno};
+  return {std::make_unique<TcpListener>(std::move(socket), ntohs(address.sin_port)), nullptr, 0};
+}
+bool IsPhysicalLanInterface(const std::string& name, unsigned interface_index) {
+  // Virtual Ethernet devices may also report CONNECTION_ETHERNET. Require a
+  // backing device, excluding bridges, veth and TUN/TAP interfaces.
+  if (name.empty() || name.size() >= IFNAMSIZ || name.find('/') != std::string::npos ||
+      name.find('\0') != std::string::npos || !interface_index ||
+      if_nametoindex(name.c_str()) != interface_index) return false;
+  return base::PathExists(base::FilePath("/sys/class/net").Append(name).Append("device"));
+}
+ListenerResult CreateBoundLanUpgradeListener(const TcpRoute& route) {
+  const auto source = net::IPAddress::FromIPLiteral(route.local_address);
+  if (!source || !source->IsIPv4() || !route.interface_index)
+    return {nullptr, "invalid_lan_listener_route", 0};
+  base::ScopedFD socket(::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
+  if (!socket.is_valid()) return {nullptr, "lan_listener_setup_failed", errno};
+  sockaddr_in address{};
+  socklen_t size = sizeof(address);
+  if (!net::IPEndPoint(*source, 0).ToSockAddr(reinterpret_cast<sockaddr*>(&address), &size))
+    return {nullptr, "invalid_lan_listener_route", 0};
+  // IP_UNICAST_IF chooses reply routing without requiring SO_BINDTODEVICE
+  // privileges. Bind the exact address; the session also checks the peer route.
+  const uint32_t index = htonl(route.interface_index);
+  if (setsockopt(socket.get(), IPPROTO_IP, IP_UNICAST_IF, &index, sizeof(index)) ||
+      bind(socket.get(), reinterpret_cast<sockaddr*>(&address), size) || listen(socket.get(), 4))
+    return {nullptr, "lan_listener_bind_failed", errno};
+  if (getsockname(socket.get(), reinterpret_cast<sockaddr*>(&address), &size))
+    return {nullptr, "lan_listener_address_failed", errno};
   return {std::make_unique<TcpListener>(std::move(socket), ntohs(address.sin_port)), nullptr, 0};
 }
 }  // namespace crquickshare

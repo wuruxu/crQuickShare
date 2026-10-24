@@ -11,10 +11,29 @@
 #if BUILDFLAG(IS_WIN)
 #include <atomic>
 #include <iphlpapi.h>
+#elif BUILDFLAG(IS_MAC)
+#include <SystemConfiguration/SystemConfiguration.h>
+#include <atomic>
+#include "base/apple/scoped_cftyperef.h"
+#include "base/apple/scoped_dispatch_object.h"
+#include "base/memory/ref_counted.h"
 #endif
 
 namespace crquickshare {
 namespace {
+#if BUILDFLAG(IS_MAC)
+using NetworkChangeFlag = base::RefCountedData<std::atomic<bool>>;
+const void* RetainNetworkChangeFlag(const void* context) {
+  static_cast<const NetworkChangeFlag*>(context)->AddRef();
+  return context;
+}
+void ReleaseNetworkChangeFlag(const void* context) {
+  static_cast<const NetworkChangeFlag*>(context)->Release();
+}
+void NetworkChanged(SCDynamicStoreRef, CFArrayRef, void* context) {
+  static_cast<NetworkChangeFlag*>(context)->data.store(true, std::memory_order_relaxed);
+}
+#endif
 class NativeMdnsNetwork final : public MdnsNetwork {
  public:
   NativeMdnsNetwork();
@@ -40,6 +59,12 @@ class NativeMdnsNetwork final : public MdnsNetwork {
   std::atomic<bool> network_dirty_{false};
   HANDLE interface_notification_ = nullptr;
   HANDLE address_notification_ = nullptr;
+#elif BUILDFLAG(IS_MAC)
+  // The store retains this flag independently of the owning discovery object,
+  // so an in-flight callback remains safe during shutdown.
+  scoped_refptr<NetworkChangeFlag> network_dirty_ = base::MakeRefCounted<NetworkChangeFlag>();
+  base::apple::ScopedDispatchObject<dispatch_queue_t> network_queue_;
+  base::apple::ScopedCFTypeRef<SCDynamicStoreRef> network_store_;
 #endif
 };
 NativeMdnsNetwork::NativeMdnsNetwork() {
@@ -49,6 +74,40 @@ NativeMdnsNetwork::NativeMdnsNetwork() {
   if (interface_error != NO_ERROR || address_error != NO_ERROR)
     LOG(WARNING) << "crQuickShare: mDNS network notification registration failed; interface_error="
                  << interface_error << "; address_error=" << address_error << "; polling_fallback=1";
+#elif BUILDFLAG(IS_MAC)
+  SCDynamicStoreContext context{0, network_dirty_.get(), &RetainNetworkChangeFlag,
+                               &ReleaseNetworkChangeFlag, nullptr};
+  network_store_.reset(SCDynamicStoreCreate(nullptr, CFSTR("crQuickShare.mDNS"), &NetworkChanged, &context));
+  if (!network_store_) {
+    LOG(WARNING) << "crQuickShare: mDNS network notification registration failed; operation=dynamic_store; system_error="
+                 << SCError() << "; polling_fallback=1";
+    return;
+  }
+  const void* keys[] = {CFSTR("State:/Network/Global/IPv4"), CFSTR("State:/Network/Interface")};
+  // Include per-interface link and Wi-Fi changes even when IPv4 is unchanged,
+  // as well as IPv4 changes on services that are not the primary route.
+  const void* patterns[] = {CFSTR("^State:/Network/Interface/[^/]+/(IPv4|Link|AirPort)$"),
+                            CFSTR("^State:/Network/Service/[^/]+/IPv4$")};
+  base::apple::ScopedCFTypeRef<CFArrayRef> notification_keys(
+      CFArrayCreate(nullptr, keys, std::size(keys), &kCFTypeArrayCallBacks));
+  base::apple::ScopedCFTypeRef<CFArrayRef> notification_patterns(
+      CFArrayCreate(nullptr, patterns, std::size(patterns), &kCFTypeArrayCallBacks));
+  if (!notification_keys || !notification_patterns ||
+      !SCDynamicStoreSetNotificationKeys(network_store_.get(), notification_keys.get(), notification_patterns.get())) {
+    LOG(WARNING) << "crQuickShare: mDNS network notification registration failed; operation=notification_keys; system_error="
+                 << SCError() << "; polling_fallback=1";
+    network_store_.reset();
+    return;
+  }
+  network_queue_.reset(dispatch_queue_create("crQuickShare.mDNS.network", DISPATCH_QUEUE_SERIAL));
+  if (!network_queue_ || !SCDynamicStoreSetDispatchQueue(network_store_.get(), network_queue_.get())) {
+    LOG(WARNING) << "crQuickShare: mDNS network notification registration failed; operation=dispatch_queue; system_error="
+                 << SCError() << "; polling_fallback=1";
+    network_store_.reset();
+    network_queue_.reset();
+    return;
+  }
+  LOG(INFO) << "crQuickShare: mDNS network notifications ready; backend=SystemConfiguration";
 #endif
 }
 NativeMdnsNetwork::~NativeMdnsNetwork() {
@@ -57,6 +116,8 @@ NativeMdnsNetwork::~NativeMdnsNetwork() {
   // Cancellation waits for callbacks while their atomic state is still alive.
   if (interface_notification_) CancelMibChangeNotify2(interface_notification_);
   if (address_notification_) CancelMibChangeNotify2(address_notification_);
+#elif BUILDFLAG(IS_MAC)
+  if (network_store_) SCDynamicStoreSetDispatchQueue(network_store_.get(), nullptr);
 #endif
 }
 int NativeMdnsNetwork::error() const { return platform::Error(); }
@@ -70,6 +131,8 @@ std::optional<std::vector<MdnsInterface>> NativeMdnsNetwork::Interfaces() {
 bool NativeMdnsNetwork::Changed() {
 #if BUILDFLAG(IS_WIN)
   return network_dirty_.exchange(false, std::memory_order_relaxed);
+#elif BUILDFLAG(IS_MAC)
+  return network_dirty_->data.exchange(false, std::memory_order_relaxed);
 #else
   return false;
 #endif

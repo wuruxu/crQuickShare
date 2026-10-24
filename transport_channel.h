@@ -6,7 +6,9 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 #include "base/containers/span.h"
 #include "base/time/time.h"
 
@@ -54,8 +56,21 @@ struct ChannelConnectResult {
   const char* outcome = "connect_failed";
   int system_error = 0;
 };
-// One IPv4 attempt. The caller owns address fallback and overall time budget.
-// An explicit route requires both source IPv4 and interface index. Failure to
+struct TcpRoute {
+  std::string local_address;  // Canonical numeric IP text without a scope suffix.
+  unsigned interface_index = 0, prefix_length = 0;
+  bool operator==(const TcpRoute&) const = default;
+};
+bool IsTcpUnicastAddress(const std::string& address, bool allow_ipv6_link_local);
+// Worker-only enumeration of usable, directly attached source addresses.
+// A zero interface index considers all interfaces. Link-local IPv6 is only
+// usable when the caller specifies the interface that provides its scope.
+std::optional<std::vector<TcpRoute>> FindTcpRoutes(
+    const std::string& address, bool allow_ipv6_link_local, unsigned interface_index = 0);
+bool IsTcpRouteAvailable(const std::string& address, const std::string& local_address,
+                         unsigned interface_index);
+// One IPv4 or IPv6 attempt. The caller owns fallback and overall time budget.
+// An explicit route requires both source address and interface index. Failure to
 // bind it is reported, never silently retried with system routing. Empty route
 // preserves system routing for callers without discovery information.
 // active is called synchronously on the worker, at most 100 ms between polls.
@@ -64,8 +79,9 @@ ChannelConnectResult ConnectTcpChannel(const std::string& address, uint16_t port
                                       const std::function<bool()>& active,
                                       const std::string& local_address = {},
                                       unsigned interface_index = 0);
-// Upgrade credentials contain four network-order IPv4 bytes, not IP text.
+// Upgrade credentials contain four or sixteen network-order address bytes.
 // Only directly attached unicast peers are accepted; bind the selected route.
+// IPv6 link-local and mapped addresses are not accepted for LAN.
 ChannelConnectResult ConnectLanUpgradeChannel(const std::string& address, int port,
                                              base::TimeTicks deadline,
                                              const std::function<bool()>& active);

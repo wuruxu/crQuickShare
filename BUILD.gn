@@ -35,6 +35,7 @@ grit("strings") {
 }
 repack("resources") {
   sources = [
+    "$root_gen_dir/device/bluetooth/strings/bluetooth_strings_en-US.pak",
     "$root_gen_dir/ui/resources/ui_resources_100_percent.pak",
     "$root_gen_dir/ui/strings/app_locale_settings_en-US.pak",
     "$root_gen_dir/ui/strings/ax_strings_en-US.pak",
@@ -45,6 +46,7 @@ repack("resources") {
   output = "$root_out_dir/crquickshare_resources.pak"
   deps = [
     ":strings",
+    "//device/bluetooth/strings",
     "//ui/resources",
     "//ui/strings",
     "//ui/views/resources",
@@ -64,6 +66,7 @@ repack("resources_200") {
 foreach(locale, cqs_locales) {
   repack("resources_${locale}") {
     sources = [
+      "$root_gen_dir/device/bluetooth/strings/bluetooth_strings_${locale}.pak",
       "$root_gen_dir/ui/strings/app_locale_settings_${locale}.pak",
       "$root_gen_dir/ui/strings/ax_strings_${locale}.pak",
       "$root_gen_dir/ui/strings/ui_strings_${locale}.pak",
@@ -72,6 +75,7 @@ foreach(locale, cqs_locales) {
     output = "$root_out_dir/crquickshare_resources_${locale}.pak"
     deps = [
       ":strings",
+      "//device/bluetooth/strings",
       "//ui/strings",
     ]
   }
@@ -183,12 +187,17 @@ source_set("protocol") {
   }
   if (is_mac) {
     sources += [ "file_storage_mac.cc" ]
+    frameworks = [
+      "CoreFoundation.framework",
+      "SystemConfiguration.framework",
+    ]
   }
   if (enable_libcr_shared) {
     deps = [ "//libcr:engine" ]
   } else {
     deps = [
       "//base",
+      "//net",
       "//third_party/nearby:offline_wire_formats_proto",
       "//third_party/nearby:wire_format_proto",
       "//third_party/ukey2",
@@ -200,10 +209,46 @@ source_set("protocol") {
   # Uses the upstream protocol and crypto targets without ChromeOS platform
   # code.
 }
-if ((is_linux && !is_chromeos) || is_win) {
+if (is_mac) {
+source_set("wifi_client_mac") {
+  sources = [ "corewlan_client_mac.h", "corewlan_client_mac.mm" ]
+  public_deps = [ ":protocol" ]
+  frameworks = [
+    "AppKit.framework",
+    "CoreLocation.framework",
+    "CoreWLAN.framework",
+    "Foundation.framework",
+    "Security.framework",
+  ]
+  if (enable_libcr_shared) {
+    deps = [ "//libcr:engine" ]
+  } else {
+    deps = [ "//base" ]
+  }
+}
+}
+if ((is_linux && !is_chromeos) || is_win || is_mac) {
 source_set("ble") {
   public_deps = [ ":protocol" ]
-  sources = [ "ble_wakeup.cc", "ble_wakeup.h", "ble_discovery.cc", "ble_discovery.h", "bootstrap_probe.cc", "bootstrap_probe.h", "bluetooth_receiver.cc", "bluetooth_receiver.h" ]
+  sources = [ "ble_discovery.cc", "ble_discovery.h", "bootstrap_probe.cc", "bootstrap_probe.h" ]
+  if (is_linux || is_win) {
+    sources += [ "ble_wakeup.cc", "ble_wakeup.h", "bluetooth_receiver.cc", "bluetooth_receiver.h" ]
+  }
+  if (is_mac) {
+    sources += [
+      "bluetooth_connector_mac.h",
+      "bluetooth_connector_mac.mm",
+      "mac_bluetooth_reconnect.h",
+      "mac_bluetooth_reconnect.mm",
+      "mac_sdp_client.h",
+      "mac_sdp_client.mm",
+      "hotspot_upgrade_mac.mm",
+      "mac_fast_init_experiment.h",
+      "mac_fast_init_experiment.mm",
+    ]
+    public_deps += [ ":wifi_client_mac" ]
+    frameworks = [ "CoreBluetooth.framework", "Foundation.framework", "IOBluetooth.framework" ]
+  }
   if (is_linux) {
     configs += [ "//build/config/linux/dbus" ]
     sources += [ "hotspot_upgrade_linux.cc", "wifi_direct_go_linux.cc" ]
