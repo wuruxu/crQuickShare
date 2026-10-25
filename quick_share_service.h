@@ -10,6 +10,7 @@
 #include <vector>
 #include "base/files/file_path.h"
 #include "crQuickShare/hotspot_upgrade.h"
+#include "crQuickShare/endpoint_info_codec.h"
 #include "crQuickShare/wifi_direct_go.h"
 
 namespace crquickshare {
@@ -72,6 +73,7 @@ struct Snapshot {
   int64_t remaining_seconds = -1;  // Unknown until a speed estimate is available.
   std::string peer_name;
   uint8_t peer_device_type = 0;
+  Presentation peer_presentation;
   std::string code;
   std::vector<std::string> files;
   uint32_t text_count = 0;
@@ -86,7 +88,7 @@ class QuickShareService {
  public:
   struct ReceivedText { uint64_t session; std::string text; };
   QuickShareService(std::string name, base::FilePath destination, bool receive_text = false,
-                    TransferJournalFactory journal_factory = {});
+                    TransferJournalFactory journal_factory = {}, Presentation presentation = {});
   ~QuickShareService();
   Snapshot GetSnapshot() const;
   // Blocking worker-only experiment: handshake, anonymous pairing, optional

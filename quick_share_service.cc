@@ -116,10 +116,10 @@ struct QuickShareService::Impl {
   std::vector<QuickShareService::ReceivedText> received_texts;
   base::TimeTicks visible_until;
   struct Session;
-  Impl(std::string n, base::FilePath d, bool allow_text, bool start_discovery = true, TransferJournalFactory journal = {}) : name(std::move(n)), destination(std::move(d)), receive_text(allow_text), journal_factory(std::move(journal)) {
+  Impl(std::string n, base::FilePath d, bool allow_text, bool start_discovery = true, TransferJournalFactory journal = {}, Presentation presentation = {}) : name(std::move(n)), destination(std::move(d)), receive_text(allow_text), journal_factory(std::move(journal)) {
     constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     for (int i = 0; i < 4; ++i) endpoint += alphabet[base::RandGenerator(36)];
-    endpoint_info = MakeEndpointInfo(name);
+    endpoint_info = MakeEndpointInfo(name, presentation);
     if (start_discovery) discovery_thread = std::thread([this] { Discover(); });
   }
   ~Impl() {
@@ -167,9 +167,9 @@ struct QuickShareService::Impl::Session {
   base::TimeTicks diagnostic_started = base::TimeTicks::Now();
   void Stage(const char* value) {
     diagnostic_stage = value;
-    LOG(INFO) << "crQuickShare: Connection stage; session=" << diagnostic_session
-              << "; outgoing=" << outgoing << "; stage=" << diagnostic_stage
-              << "; elapsed_ms=" << (base::TimeTicks::Now() - diagnostic_started).InMilliseconds();
+    //LOG(INFO) << "crQuickShare: Connection stage; session=" << diagnostic_session
+    //          << "; outgoing=" << outgoing << "; stage=" << diagnostic_stage
+    //          << "; elapsed_ms=" << (base::TimeTicks::Now() - diagnostic_started).InMilliseconds();
   }
   std::unique_ptr<TransportChannel> channel;
   std::unique_ptr<FileStorage> storage = CreateFileStorage();
@@ -996,7 +996,7 @@ struct QuickShareService::Impl::Session {
       if (peer_name.empty() || r.endpoint_id().size() != 4) return Fail("Invalid endpoint information");
       remote_endpoint = r.endpoint_id();
       const auto& peer_info = r.has_endpoint_info() ? r.endpoint_info() : r.endpoint_name();
-      owner.Update([&](Snapshot& s) { s.peer_name = peer_name; s.peer_device_type = EndpointDeviceType(peer_info); });
+      owner.Update([&](Snapshot& s) { s.peer_name = peer_name; s.peer_device_type = EndpointDeviceType(peer_info); s.peer_presentation = EndpointPresentation(peer_info); });
     }
     Stage("ukey2");
     using Handshake = securegcm::UKey2Handshake;
@@ -2427,6 +2427,7 @@ void QuickShareService::Impl::Start(std::unique_ptr<TransportChannel> transport,
     s.peer_name = outgoing ? outgoing->peer.name : std::string(); s.code.clear(); s.files.clear();
     s.text_count = 0; s.text_is_url = false;
     s.peer_device_type = outgoing ? EndpointDeviceType(outgoing->peer.endpoint_info) : 0;
+    s.peer_presentation = outgoing ? EndpointPresentation(outgoing->peer.endpoint_info) : Presentation();
     s.transferred = s.total = 0; s.diagnostic.clear(); s.received_directory.clear();
     s.failure = Failure::kNone;
     ResetProgress();
@@ -2695,8 +2696,8 @@ void QuickShareService::Impl::Discover() {
   }
 }
 QuickShareService::QuickShareService(std::string name, base::FilePath destination, bool receive_text,
-                                   TransferJournalFactory journal_factory)
-    : impl_(std::make_unique<Impl>(std::move(name), std::move(destination), receive_text, true, std::move(journal_factory))) {}
+                                   TransferJournalFactory journal_factory, Presentation presentation)
+    : impl_(std::make_unique<Impl>(std::move(name), std::move(destination), receive_text, true, std::move(journal_factory), presentation)) {}
 std::vector<QuickShareService::ReceivedText> QuickShareService::TakeReceivedTexts() {
   std::lock_guard guard(impl_->mutex);
   std::vector<ReceivedText> result;
@@ -2769,6 +2770,7 @@ bool QuickShareService::Send(const Peer& peer, std::vector<base::FilePath> paths
   ++impl_->state.session;
   impl_->state.incoming = false; impl_->state.peer_name = selected.name;
   impl_->state.peer_device_type = EndpointDeviceType(peer.endpoint_info);
+  impl_->state.peer_presentation = EndpointPresentation(peer.endpoint_info);
   impl_->state.code.clear(); impl_->state.files.clear();
   impl_->state.transferred = impl_->state.total = 0; impl_->state.diagnostic.clear();
   impl_->state.failure = Failure::kNone;
@@ -2799,6 +2801,7 @@ bool QuickShareService::SendBluetooth(const Peer& peer, std::vector<base::FilePa
   ++impl_->state.session;
   impl_->state.incoming = false; impl_->state.peer_name = peer.name;
   impl_->state.peer_device_type = EndpointDeviceType(peer.endpoint_info);
+  impl_->state.peer_presentation = EndpointPresentation(peer.endpoint_info);
   impl_->state.code.clear(); impl_->state.files.clear();
   impl_->state.transferred = impl_->state.total = 0; impl_->state.diagnostic.clear();
   impl_->state.failure = Failure::kNone; impl_->ResetProgress();
@@ -2845,6 +2848,7 @@ bool QuickShareService::ReceiveBluetooth(std::unique_ptr<TransportChannel> chann
   impl_->state.incoming = true; impl_->state.busy = true;
   impl_->state.phase = Phase::kConnecting;
   impl_->state.peer_name.clear(); impl_->state.code.clear(); impl_->state.files.clear();
+  impl_->state.peer_presentation = {};
   impl_->state.peer_device_type = 0; impl_->state.text_count = 0; impl_->state.text_is_url = false;
   impl_->state.transferred = impl_->state.total = 0; impl_->state.diagnostic.clear();
   impl_->state.received_directory.clear(); impl_->state.failure = Failure::kNone;
