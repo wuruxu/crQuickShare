@@ -72,7 +72,7 @@ Nearby service is linked.
 | Standalone crQuickShare | LAN file sending/receiving, BLE discovery and Fast Initiation assistance, native confirmation and progress UI |
 | crFiles on Linux | LAN and Bluetooth sharing, hotspot upgrades, optional Wi-Fi Direct client/GO, text and link reception to the clipboard |
 | crFiles on Windows | LAN and Bluetooth sharing, BLE/GATT discovery, Fast Initiation, Bluetooth-to-LAN and phone-hotspot upgrades; hardware validation remains pending |
-| crFiles on macOS | BLE/GATT discovery, outgoing Bluetooth connections with LAN, phone-hotspot and experimental Direct station-client upgrades, LAN reception, and a default-on Fast Init local-name experiment; Direct client interoperability remains pending hardware validation |
+| crFiles on macOS | BLE/GATT discovery, outgoing Bluetooth connections with LAN, phone-hotspot and experimental Direct station-client upgrades, LAN reception, and a new FEF3 local-name Bluetooth receiver pending phone validation; the receiver takes priority over the Fast Init experiment |
 | crPhotos on macOS | BLE/GATT discovery, outgoing Bluetooth connections with LAN upgrades, and LAN reception; hotspot client integration remains pending |
 | Shared protocol core | Framing, authentication, transfer state, cancellation, acknowledgements, and file validation with native Linux/Windows/macOS backends |
 
@@ -117,8 +117,9 @@ LAN sharing requires reachable UDP 5353 and the application's TCP listener on
 the same IPv4 subnet. AP isolation, multicast filtering, or a firewall can
 prevent discovery or connection. The app does not change firewall rules.
 Bluetooth features use BlueZ on Linux, Windows Bluetooth APIs, or CoreBluetooth
-and IOBluetooth on macOS. Bluetooth reception is implemented on Linux/Windows
-and additionally requires peripheral advertising and local GATT support.
+and IOBluetooth on macOS. Bluetooth reception requires peripheral advertising
+and local GATT support. Linux/Windows use their existing discovery publishers;
+macOS now has an Apple local-name receiver backend pending phone validation.
 
 ## Transport selection
 
@@ -359,8 +360,9 @@ crFiles advertises a Hotspot client and joins the Android-provided network using
 the reusable `:wifi_client_mac` target (`CoreWlanClient`). The protocol still
 handles credentials, encrypted channel migration and transfer acknowledgements.
 This backend creates neither a Mac hotspot nor a Wi-Fi Direct group, and it does
-not enable Bluetooth reception or standard Service Data Fast Initiation advertising
-on macOS. A separate local-name broadcast experiment is described below.
+not itself enable Bluetooth reception or standard Service Data Fast Initiation
+advertising on macOS. The separate receiver backend and Fast Init experiment
+are described below.
 
 Opening nearby discovery requests location access in addition to Bluetooth.
 macOS requires this access to identify Wi-Fi networks and their BSSIDs; no
@@ -540,14 +542,230 @@ excludes further Direct client paths for that session. Hardware validation is
 still required for phone compatibility, repeat sends, cancellation, malformed or
 IPv6-only paths, fallback to LAN/Hotspot, and cleanup after late association.
 
-### macOS Fast Initiation local-name experiment
+### macOS Bluetooth receiver
 
-The macOS experiment is enabled by default during Quick Share discovery. No
-enable flag is required. For a comparison, disable it explicitly in one run:
+crFiles now wires `BluetoothReceiver` into macOS reception. The existing
+Chromium `CreateRfcommService` implementation publishes the NearbySharing SDP
+service (`a82efa21-ae5c-3dde-9bbc-f16da7b16c5a`) and accepts RFCOMM sockets.
+Incoming sockets enter `BootstrapProbe::Receive` and the existing encrypted
+session, user confirmation, file storage and Wi-Fi upgrade flow. Reception
+does not enable automatic acceptance or change the LAN-first upgrade policy.
+
+`BluetoothPeripheralMac` supplies the platform-specific discovery publisher:
+
+- One primary FEF3 GATT service with readable slot
+  `00000000-0000-3000-8000-000000000000`, containing the same full advertisement
+  as Linux/Windows, including the real local classic Bluetooth address.
+- FEF3 service UUID plus a Base64URL local name. The 15-byte V2 header contains
+  one slot, the NearbySharing bloom filter and a four-byte advertisement hash.
+  Its encoded name is exactly 20 bytes, with no extra Base64 layer or truncation.
+  No L2CAP PSM or extended-advertisement capability is claimed.
+- Dynamic read/blob responses validate the requested characteristic, current
+  visibility and offset. Writes are rejected. Read diagnostics do not claim
+  that the phone displayed the endpoint.
+
+This follows the local-name transport used by
+[Nearby's Apple GATT server](https://github.com/google/nearby/blob/main/internal/platform/implementation/apple/Mediums/BLE/GNCBLEGATTServer.m)
+for raw V2 headers. It is not a Service Data advertisement. Compatibility with
+the installed Android Quick Share version remains a hardware validation item;
+an OS advertising callback alone does not prove discovery.
+
+The receiver is enabled with Quick Share reception, including when the outgoing
+device dialog is closed. It requests Bluetooth permission asynchronously before
+calling classic APIs; a pending or denied permission cannot start the listener.
+GATT setup and advertising each have a 10-second limit, followed by the shared
+15-second retry backoff on failure. Busy sessions withdraw advertising and deny
+GATT reads. Disabling reception, changing identity or shutting down retires the
+native manager and listener; callbacks from retired managers are ignored.
+
+On macOS, foreground send discovery temporarily withdraws FEF3 receiver
+advertising and runs the FE2C Fast Init experiment. The existing RFCOMM listener
+and GATT service are retained; this handoff does not change their channel or
+endpoint identity. If a receiver advertising start is pending, its callback
+must settle before Fast Init starts. Normal setup timeouts still apply.
+Closing the send picker or starting a transfer stops Fast Init before reception
+advertising can resume; a busy session keeps receiver advertising withdrawn.
+Disabling the Fast Init experiment leaves receiver advertising available during
+discovery. This arbitration applies only to macOS; Linux and Windows are unchanged.
+For a receiver-disabled baseline comparison, restart with
+`--disable-quick-share-mac-bluetooth-receiver`; LAN reception and the previous
+outgoing discovery path remain available.
+
+No build or hardware transfer has been run for this receiver change. Validate
+with a rebuilt app and the phone's **Send** device picker, in this order:
+
+1. `Bluetooth receiver listener ready`, `macOS receiver GATT ready` and
+   `macOS receiver advertising started` prove local setup only.
+2. `macOS receiver GATT read` proves that a remote central read the slot.
+   Check that the phone actually lists the configured crFiles device name.
+3. Selecting the Mac should produce `Bluetooth incoming socket ready` and
+   `Bluetooth receiver incoming connection accepted`, then the existing
+   verification/acceptance prompt. Rejecting must not write a received file.
+4. Accept a file below 72 KiB, then a larger file over LAN. Check the received
+   file and session outcome; sender-side socket writes alone are insufficient.
+5. Repeat after cancel, Bluetooth off/on, reception disable/enable and rename.
+   Advertising must resume only while reception is enabled and idle. Quit
+   during setup and during a pending transfer to check cleanup.
+
+If advertising starts but no GATT read is logged, capture the actual BLE local
+name and service UUID before investigating RFCOMM or transfer code. If GATT is
+read but no incoming socket arrives, inspect the phone's SDP/RFCOMM attempt.
+
+The first macOS receiver capture confirmed that the phone displayed crFiles
+and read the 55-byte GATT value twice (offsets 0, 22 and 44), but no incoming
+session was observed. Discovery is therefore verified for that phone; RFCOMM
+acceptance and file reception are still unverified. Additional diagnostics trace:
+
+- `macOS receiver advertised route`: the exact classic address embedded in GATT
+  and the endpoint ID. Compare it with `local_address` in the SDP registration.
+- `Bluetooth RFCOMM listener SDP registration`: local record handle, assigned
+  RFCOMM channel, service classes and protocol descriptors. This is a local
+  registration snapshot, not evidence that the phone queried SDP.
+- `Bluetooth RFCOMM incoming notification registered`: notification presence,
+  channel, listener and socket identity. A missing notification now fails setup
+  and withdraws the SDP record instead of reporting the listener ready.
+- `Bluetooth RFCOMM incoming native callback`: notification identity, expected
+  and received channel, peer address, native open state and filter disposition.
+  The existing notification identity filter remains unchanged.
+- `Bluetooth incoming channel queued`, `Bluetooth incoming accept started`,
+  `Bluetooth incoming accept delegate attached` and
+  `Bluetooth incoming accept completed`: distinguish queueing from delegate
+  attachment and completion. `open_completion_pending=1` is a snapshot, not a
+  timeout or proof of failure.
+- `macOS receiver accept callback`: application admission, followed by the
+  existing bootstrap/session logs if the connection is accepted.
+
+GATT reads without any incoming native callback leave remote SDP/connect failure
+and local notification delivery unresolved; phone-side logs or a Bluetooth trace
+are needed to distinguish those cases. These diagnostics do not infer a failed
+handshake or a UI problem from missing incoming transport events.
+
+The next capture exposed an invalid local SDP route: both the RFCOMM protocol
+descriptor and incoming notification used channel 0, despite successful record
+publication and notification registration. The advertised classic address
+matched the listener's local address. macOS had preserved the old automatic
+allocation placeholder instead of assigning a usable channel.
+
+Automatic RFCOMM publication now starts with channel 1. As documented by
+`IOBluetoothSDPServiceRecord`, the system may assign an alternative if that
+channel is occupied; the listener uses the actual channel read back from SDP.
+All returned channels must pass the SDK's `RFCOMM_CHANNEL_ID_IS_VALID` check
+(1 through 30). An explicitly requested channel must also match exactly;
+invalid requests fail before publication, and invalid or mismatched published
+records are withdrawn. Channel 0 cannot reach the notification registration or
+the receiver's GATT advertising stage. A subsequent rebuilt-app capture verified
+SDP channel 1 and notification registration for channel 1, but still showed no
+application incoming callback. Reading back SDP does not prove which channel
+the native stack actually delivers to this listener.
+
+For automatic requests the diagnostics retain `requested_channel=0` to mean
+unspecified, alongside `automatic_channel=1` and `publication_channel=1`.
+The actual `rfcomm_channel` and SDP RFCOMM descriptor must now be in 1..30 and
+match the incoming notification's channel; they need not equal 1.
+
+#### macOS receiver channel selection and cleanup
+
+The controlled phone runs on 2026-10-25 found no native incoming callback on
+explicit channel 1, but channel 29 matched the SDP/notification/native channel,
+completed the incoming handshake and confirmation, upgraded to encrypted LAN,
+and committed a 463805-byte file with `delivery_confirmed=1`. This verifies that
+phone's channel-29 receive path; it does not establish why channel 1 failed.
+
+The macOS Quick Share receiver now explicitly requests channel 29 by default.
+If RFCOMM service creation reports failure (including SDP channel validation or
+notification registration failure), the next attempt uses 28, 27, 26, then 30,
+cycling through those five candidates with the existing 15-second retry delay.
+There is only one candidate attempt per retry interval. The candidates are not
+an availability guarantee. No GATT advertisement is started for a failed
+listener. Other Chromium services retain their existing automatic selection.
+
+Once setup succeeds, the receiver keeps its listener and selected candidate
+through transfers; busy sessions only withdraw advertising. Subsequent setup
+within the same receiver lifetime starts with the retained candidate. GATT or
+accept failures do not themselves advance the candidate, and absence of a phone
+connection never triggers channel rotation. This avoids invalidating cached
+phone SDP merely because the receiver is idle. A new app process starts at 29.
+
+Native listener shutdown disables callback dispatch before unregistering the
+notification and clears its token so destruction cannot unregister it again.
+The shared RFCOMM/L2CAP cleanup removes SDP after stopping notifications and logs
+the record handle, removal status and success flag. Nonzero removal status must
+be investigated, not treated as proof of successful daemon cleanup. Repeated
+RFCOMM listen calls on an occupied socket fail without replacing its record.
+
+After rebuilding separately, validate the default path without verification flags:
 
 ```sh
-out/arm64/crFiles
-out/arm64/crFiles --disable-quick-share-mac-fast-init-experiment
+python3 crFiles/tools/run_macos.py out/arm64
+```
+
+Expect `macOS receiver channel selection; requested_channel=29`, matching SDP
+and notification channels, then native `result=matched` on a phone connection.
+Send two files in successive sessions, toggle reception off/on, then restart
+the app and repeat. Confirm successful file commits, advertising resumption,
+and the SDP removal status when the listener actually stops. These production
+selection and cleanup changes have not yet been built or hardware-validated.
+The successful earlier run used the explicit verification switch.
+
+#### Controlled macOS incoming channel verification
+
+Use `--quick-share-mac-receiver-rfcomm-channel=N` to request one explicit channel
+in 1..30. This opt-in mode permits at most one listener creation attempt per
+receiver lifetime, disables setup retries and requires an app restart after
+the listener is stopped. Invalid input disables Bluetooth reception for that
+run; it does not silently select another channel. A mismatched SDP channel
+fails setup before GATT advertising. Without this switch, the receiver uses
+the candidate policy above and normal retries. File acceptance still requires the
+existing confirmation flow.
+
+After rebuilding separately, fully quit all crFiles instances. Run the baseline,
+make one phone-to-Mac send attempt, then quit to collect the verification summary:
+
+```sh
+python3 crFiles/tools/run_macos.py out/arm64 -- --quick-share-mac-receiver-rfcomm-channel=1
+```
+
+Repeat in a fresh process with a different explicit channel:
+
+```sh
+python3 crFiles/tools/run_macos.py out/arm64 -- --quick-share-mac-receiver-rfcomm-channel=29
+```
+
+Channel 29 is a comparison value, not a guarantee that it is free. For each run,
+reopen the phone's Send device picker, select the freshly advertised Mac and
+check for fresh GATT reads. The service UUID remains unchanged, so the phone
+may cache SDP: where a phone/system Bluetooth trace is available, verify that
+its attempted RFCOMM channel equals this run's SDP value. An attempt against
+the old channel does not test the new listener.
+
+Correlate `Bluetooth RFCOMM listener SDP registration`, notification registration
+and `Bluetooth RFCOMM incoming channel verification` by socket/listener identity:
+
+- `result=matched`: a native incoming callback with the registered notification
+  carried the same channel as the published SDP record. Check `is_open` and the
+  subsequent accept/session logs separately; channel identity is not proof of
+  protocol handshake or file delivery.
+- `result=mismatch`: that native callback carried a different channel. Preserve
+  the complete callback and SDP logs for investigation.
+- The shutdown `incoming channel verification summary` reports `unobserved`
+  if no qualifying incoming callback arrived. This is inconclusive, not proof
+  of a channel mismatch. A mismatch takes precedence over matches in the summary.
+
+If only one explicit channel works, this supports a channel-dependent failure;
+it does not by itself prove silent native channel reassignment. This experiment
+uses the app's public RFCOMM APIs and does not need a bluetoothd memory dump.
+The channel-1/channel-29 hardware results are recorded above.
+
+### macOS Fast Initiation local-name experiment
+
+The macOS experiment remains enabled by default during Quick Share discovery.
+Foreground discovery takes advertising priority over the Bluetooth receiver,
+which resumes advertising when discovery ends and reception is enabled and idle.
+To compare the experiment independently, disable the receiver in both runs:
+
+```sh
+out/arm64/crFiles --disable-quick-share-mac-bluetooth-receiver
+out/arm64/crFiles --disable-quick-share-mac-bluetooth-receiver --disable-quick-share-mac-fast-init-experiment
 ```
 
 Exit the application between runs so the singleton starts with the intended
@@ -573,10 +791,25 @@ service. It does not power on Bluetooth or initiate a connection.
 
 This encoding is not equivalent to the standard FE2C Service Data advertisement.
 Chromium's Fast Initiation scanner matches Service Data directly, and Android
-Fast Initiation support for the local-name alternative is unverified. A successful
-CoreBluetooth callback proves OS acceptance only. The log explicitly records
+Fast Initiation support for the local-name alternative is not established across
+devices. A receiver-disabled run on 2026-10-25 found a connectable phone within
+3.5 seconds, with the user reporting that the phone was outside its Receive page
+and not in Everyone visibility mode. This is positive interoperability evidence,
+not proof of causality or general Android support. A successful CoreBluetooth
+callback alone proves OS acceptance only. The log explicitly records
 `mode=silent`, `wire_service_data=0` and `peer_response_confirmed=0`; neither notification nor
 remote discovery should be inferred from the callback alone.
+
+To validate macOS advertising arbitration after rebuilding separately, launch
+without switches, open the send picker with the phone's Receive page closed,
+and look for `paused_for_discovery=1`, receiver advertising withdrawal, then
+`FastInit experiment advertising started`. Closing the picker should log
+Fast Init stopping, `paused_for_discovery=0`, and receiver advertising resuming
+without another RFCOMM/SDP registration when the listener was already prepared.
+Repeat rapid picker open/close and test an incoming transfer afterwards. With
+`--disable-quick-share-mac-fast-init-experiment`, opening the picker must not
+pause reception advertising. The arbitration change has not been compiled or
+hardware-validated here.
 
 The experiment runs while the device dialog is discovering, stops when discovery
 is paused, the dialog closes, a transfer starts or the host shuts down, and waits

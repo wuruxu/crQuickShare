@@ -27,7 +27,7 @@ std::optional<Peer> ParseAdvertisement(std::string_view bytes, const char*& reas
                                      AdvertisementDetails* details = nullptr);
 bool IsOnLostAdvertisement(std::string_view bytes);
 std::optional<GattHeader> ParseGattHeader(std::string_view bytes);
-// Regular FEF3 service data, shared by the Linux and Windows receiver.
+// Regular FEF3 GATT value, shared by the desktop receivers.
 std::string EncodeAdvertisement(const Peer& peer, std::string_view mac);
 std::string EncodeGattHeader();
 }
