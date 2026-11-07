@@ -7,9 +7,9 @@ and Wi-Fi upgrade modules for crFiles.
 ## Available apps
 
 <p>
-  <a href="https://github.com/wuruxu/crfiles"><img src="docs/images/crFiles.svg" alt="" width="32" height="32" align="absmiddle"> crFiles</a>
+  <a href="https://github.com/libcr/crFiles"><img src="docs/images/crFiles.svg" alt="" width="32" height="32" align="absmiddle"> crFiles</a>
   &nbsp;&nbsp;&nbsp;
-  <a href="https://github.com/wuruxu/crPhotos"><img src="docs/images/crPhotos.svg" alt="" width="32" height="32" align="absmiddle"> crPhotos</a>
+  <a href="https://github.com/libcr/crPhotos"><img src="docs/images/crPhotos.svg" alt="" width="32" height="32" align="absmiddle"> crPhotos</a>
 </p>
 
 ## Technical highlights
