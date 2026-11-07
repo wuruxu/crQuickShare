@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">crPhotos logo</title>
+  <desc id="desc">A four-blade camera aperture using Chrome colors, separated by rotationally symmetric cubic Bezier curves.</desc>
+
+  <defs>
+    <clipPath id="lens-clip">
+      <circle cx="256" cy="256" r="213"/>
+    </clipPath>
+    <linearGradient id="red" x1="110" y1="95" x2="305" y2="230" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F45B52"/>
+      <stop offset="1" stop-color="#EA4335"/>
+    </linearGradient>
+    <linearGradient id="yellow" x1="411" y1="101" x2="297" y2="286" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFD866"/>
+      <stop offset="1" stop-color="#FBBC04"/>
+    </linearGradient>
+    <linearGradient id="green" x1="410" y1="401" x2="216" y2="300" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#18B96B"/>
+      <stop offset="1" stop-color="#0F9D58"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="86" y1="385" x2="220" y2="220" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5F92E8"/>
+      <stop offset="1" stop-color="#4285F4"/>
+    </linearGradient>
+  </defs>
+
+  <g clip-path="url(#lens-clip)">
+    <g transform="translate(256 256) scale(1.054455) translate(-256 -256)">
+    <!--
+      Four G1-balanced cubic Bezier dividers. Each curve is a 90-degree
+      rotation of the previous one around (256,256), producing a taiji-like
+      logarithmic-spiral impression while remaining perfectly symmetric.
+    -->
+    <path d="M78 161 A202 202 0 0 1 351 78 C325 150 256 132 256 186.86 L255.49 190.78 L252.13 201.48 L244.14 216.32 L231.56 231.56 L216.32 244.14 L201.48 252.13 L190.78 255.49 L186.86 256 C132 256 150 187 78 161 Z" fill="url(#red)"/>
+    <path d="M351 78 A202 202 0 0 1 434 351 C362 325 380 256 325.14 256 L321.22 255.49 L310.52 252.13 L295.68 244.14 L280.44 231.56 L267.86 216.32 L259.87 201.48 L256.51 190.78 L256 186.86 C256 132 325 150 351 78 Z" fill="url(#yellow)"/>
+    <path d="M434 351 A202 202 0 0 1 161 434 C187 362 256 380 256 325.14 L256.51 321.22 L259.87 310.52 L267.86 295.68 L280.44 280.44 L295.68 267.86 L310.52 259.87 L321.22 256.51 L325.14 256 C380 256 362 325 434 351 Z" fill="url(#green)"/>
+    <path d="M161 434 A202 202 0 0 1 78 161 C150 187 132 256 186.86 256 L190.78 256.51 L201.48 259.87 L216.32 267.86 L231.56 280.44 L244.14 295.68 L252.13 310.52 L255.49 321.22 L256 325.14 C256 380 187 362 161 434 Z" fill="url(#blue)"/>
+
+    <!-- White mathematical curves separate the four aperture blades. -->
+    <!-- Constant-width dividers begin at the four astroid cusps. -->
+    <g fill="none" stroke="#FFFFFF" stroke-width="11" stroke-linecap="butt" stroke-linejoin="round">
+      <path d="M256 186.86 C256 132 325 150 351 78"/>
+      <path d="M325.14 256 C380 256 362 325 434 351"/>
+      <path d="M256 325.14 C256 380 187 362 161 434"/>
+      <path d="M186.86 256 C132 256 150 187 78 161"/>
+    </g>
+    </g>
+  </g>
+
+  <!--
+    Exact sampled astroid lens: x = a*cos(t)^3, y = a*sin(t)^3.
+    The original 64-sample curve is scaled 1.5x to a = 72.9.
+  -->
+  <!-- The underlay circle is fully contained inside the astroid and prevents subpixel pinholes. -->
+  <circle cx="256" cy="256" r="36" fill="#FFFFFF"/>
+  <path d="M256.00 207.40 L256.05 208.10 L256.36 210.15 L257.19 213.41 L258.72 217.67 L261.09 222.66 L264.33 228.06 L268.41 233.55 L273.18 238.82 L278.45 243.59 L283.94 247.67 L289.34 250.91 L294.33 253.28 L298.59 254.81 L301.85 255.64 L303.90 255.95 L304.60 256.00 L303.90 256.05 L301.85 256.36 L298.59 257.19 L294.33 258.72 L289.34 261.09 L283.94 264.33 L278.45 268.41 L273.18 273.18 L268.41 278.45 L264.33 283.94 L261.09 289.34 L258.72 294.33 L257.19 298.59 L256.36 301.85 L256.05 303.90 L256.00 304.60 L255.95 303.90 L255.64 301.85 L254.81 298.59 L253.28 294.33 L250.91 289.34 L247.67 283.94 L243.59 278.45 L238.82 273.18 L233.55 268.41 L228.06 264.33 L222.66 261.09 L217.67 258.72 L213.41 257.19 L210.15 256.36 L208.10 256.05 L207.40 256.00 L208.10 255.95 L210.15 255.64 L213.41 254.81 L217.67 253.28 L222.66 250.91 L228.06 247.67 L233.55 243.59 L238.82 238.82 L243.59 233.55 L247.67 228.06 L250.91 222.66 L253.28 217.67 L254.81 213.41 L255.64 210.15 L255.95 208.10 Z"
+        transform="translate(256 256) scale(1.5) translate(-256 -256)"
+        fill="#FFFFFF" fill-rule="nonzero" stroke="#FFFFFF" stroke-width="7.73"
+        stroke-linejoin="round"/>
+
+  <!-- Subtle glass highlight. -->
+  <path d="M105 156 A188 188 0 0 1 322 77" fill="none" stroke="#FFFFFF" stroke-width="9" stroke-linecap="round" opacity="0.28"/>
+</svg>

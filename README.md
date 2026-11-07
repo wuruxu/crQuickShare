@@ -1,8 +1,16 @@
 # crQuickShare
 
-A native desktop Quick Share implementation built on Chromium 154. It provides
+A native desktop Quick Share implementation built on Chromium 156. It provides
 an account-free LAN sharing app and reusable discovery, protocol, Bluetooth,
 and Wi-Fi upgrade modules for crFiles.
+
+## Available apps
+
+<p>
+  <a href="https://github.com/wuruxu/crfiles"><img src="docs/images/crFiles.svg" alt="" width="24" height="24" align="absmiddle"> crFiles</a>
+  &nbsp;&nbsp;&nbsp;
+  <a href="https://github.com/wuruxu/crPhotos"><img src="docs/images/crPhotos.svg" alt="" width="24" height="24" align="absmiddle"> crPhotos</a>
+</p>
 
 ## Technical highlights
 

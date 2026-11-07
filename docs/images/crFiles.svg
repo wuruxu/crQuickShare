@@ -1,0 +1,158 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- 柜体阴影 -->
+    <filter id="drop-shadow" x="-10%" y="-10%" width="125%" height="125%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="18" result="body-blur" />
+      <feOffset in="body-blur" dx="0" dy="16" result="body-offset" />
+      <feFlood flood-color="#000000" flood-opacity="0.22" result="body-color" />
+      <feComposite in="body-color" in2="body-offset" operator="in" result="body-shadow" />
+      <feGaussianBlur in="SourceAlpha" stdDeviation="6" result="edge-blur" />
+      <feOffset in="edge-blur" dx="0" dy="4" result="edge-offset" />
+      <feFlood flood-color="#000000" flood-opacity="0.12" result="edge-color" />
+      <feComposite in="edge-color" in2="edge-offset" operator="in" result="edge-shadow" />
+      <feMerge>
+        <feMergeNode in="body-shadow" />
+        <feMergeNode in="edge-shadow" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <!-- 把手阴影 -->
+    <filter id="handle-shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="4" result="handle-blur" />
+      <feOffset in="handle-blur" dx="0" dy="5" result="handle-offset" />
+      <feFlood flood-color="#000000" flood-opacity="0.28" result="handle-color" />
+      <feComposite in="handle-color" in2="handle-offset" operator="in" result="handle-shadow" />
+      <feMerge>
+        <feMergeNode in="handle-shadow" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <!-- 外框立体渐变 -->
+    <linearGradient id="body-frame-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="70%" stop-color="#E8EAED" />
+      <stop offset="100%" stop-color="#D2D6DC" />
+    </linearGradient>
+
+    <!-- 内衬边框渐变 -->
+    <linearGradient id="inner-bezel" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#BCC1C8" />
+      <stop offset="100%" stop-color="#E5E8EC" />
+    </linearGradient>
+
+    <!-- 第一层：Chrome 红渐变 -->
+    <linearGradient id="chrome-red" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#F24B4B" />
+      <stop offset="100%" stop-color="#D93025" />
+    </linearGradient>
+
+    <!-- 第二层：Chrome 绿渐变 -->
+    <linearGradient id="chrome-green" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#34A853" />
+      <stop offset="100%" stop-color="#188038" />
+    </linearGradient>
+
+    <!-- 第三层：Chrome 黄渐变 -->
+    <linearGradient id="chrome-yellow" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FBBC04" />
+      <stop offset="100%" stop-color="#F29900" />
+    </linearGradient>
+
+    <!-- 把手金属质感渐变 -->
+    <linearGradient id="handle-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="40%" stop-color="#E8EAED" />
+      <stop offset="100%" stop-color="#BCC1CA" />
+    </linearGradient>
+
+    <!-- 抽屉顶部高光线 -->
+    <linearGradient id="highlight-line" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.1" />
+      <stop offset="50%" stop-color="#FFFFFF" stop-opacity="0.35" />
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.1" />
+    </linearGradient>
+
+    <!-- 抽屉缝隙阴影 -->
+    <linearGradient id="drawer-crevice" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#000000" stop-opacity="0.25" />
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.0" />
+    </linearGradient>
+
+    <!-- 抽屉把手通用组件 -->
+    <g id="handle">
+      <path d="M 0,16 
+               C 0,7.16 7.16,0 16,0 
+               L 80,0 
+               C 88.84,0 96,7.16 96,16 
+               L 96,26 
+               C 96,27.1 95.1,28 94,28 
+               L 82,28 
+               C 80.9,28 80,27.1 80,26 
+               L 80,18 
+               C 80,14.7 77.3,12 74,12 
+               L 22,12 
+               C 18.7,12 16,14.7 16,18 
+               L 16,26 
+               C 16,27.1 15.1,28 14,28 
+               L 2,28 
+               C 0.9,28 0,27.1 0,26 
+               Z" 
+            fill="url(#handle-grad)" 
+            filter="url(#handle-shadow)" />
+      <!-- 把手上沿边缘高光 -->
+      <path d="M 2,16 C 2,8.2 8.2,2 16,2 L 80,2 C 87.8,2 94,8.2 94,16" 
+            fill="none" stroke="#FFFFFF" stroke-width="1.5" opacity="0.8" />
+    </g>
+  </defs>
+
+  <!-- 1. 柜体底座与外壳 -->
+  <rect x="76" y="32" width="360" height="438" rx="46" ry="46" fill="url(#body-frame-grad)" filter="url(#drop-shadow)" />
+  
+  <!-- 外壳内凹槽轮廓 -->
+  <rect x="88" y="44" width="336" height="414" rx="36" ry="36" fill="url(#inner-bezel)" />
+
+  <!-- 2. 抽屉区域背景剪裁 -->
+  <g clip-path="url(#drawers-clip)">
+    <clipPath id="drawers-clip">
+      <rect x="92" y="48" width="328" height="406" rx="32" ry="32" />
+    </clipPath>
+
+    <!-- 顶部抽屉：红色 (Chrome Red) -->
+    <g id="drawer-top">
+      <rect x="92" y="48" width="328" height="134" fill="url(#chrome-red)" />
+      <!-- 内部顶沿微光 -->
+      <rect x="92" y="48" width="328" height="3" fill="url(#highlight-line)" />
+      <!-- 把手 -->
+      <use xlink:href="#handle" x="208" y="98" />
+      <!-- 缝隙下阴影 -->
+      <rect x="92" y="179" width="328" height="3" fill="#B31412" opacity="0.6" />
+    </g>
+
+    <!-- 中间抽屉：绿色 (Chrome Green) -->
+    <g id="drawer-middle">
+      <rect x="92" y="182" width="328" height="136" fill="url(#chrome-green)" />
+      <!-- 上沿缝隙阴影与顶沿高光 -->
+      <rect x="92" y="182" width="328" height="8" fill="url(#drawer-crevice)" />
+      <rect x="92" y="183" width="328" height="2" fill="url(#highlight-line)" />
+      <!-- 把手 -->
+      <use xlink:href="#handle" x="208" y="234" />
+      <!-- 缝隙下阴影 -->
+      <rect x="92" y="315" width="328" height="3" fill="#0D652D" opacity="0.6" />
+    </g>
+
+    <!-- 底部抽屉：黄色 (Chrome Yellow) -->
+    <g id="drawer-bottom">
+      <rect x="92" y="318" width="328" height="136" fill="url(#chrome-yellow)" />
+      <!-- 上沿缝隙阴影与顶沿高光 -->
+      <rect x="92" y="318" width="328" height="8" fill="url(#drawer-crevice)" />
+      <rect x="92" y="319" width="328" height="2" fill="url(#highlight-line)" />
+      <!-- 把手 -->
+      <use xlink:href="#handle" x="208" y="370" />
+    </g>
+  </g>
+
+  <!-- 3. 外框边缘立体内高光线条 -->
+  <rect x="77.5" y="33.5" width="357" height="435" rx="44.5" ry="44.5" fill="none" stroke="#FFFFFF" stroke-width="2.5" opacity="0.6" />
+</svg>
