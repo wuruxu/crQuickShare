@@ -52,7 +52,7 @@ struct Peer {
 enum class Phase { kIdle, kConnecting, kConfirm, kWaiting, kTransferring,
                    kRestoringNetwork, kComplete, kSent, kRejected, kCancelled, kTimedOut, kError };
 enum class Failure { kNone, kConnection, kNetwork, kStorage, kSourceFile,
-                     kUnsupported, kProtocol, kHotspotUnavailable };
+                     kUnsupported, kProtocol, kHotspotUnavailable, kBluetoothServiceInUse };
 struct Snapshot {
   std::vector<Peer> peers;
   Phase phase = Phase::kIdle;

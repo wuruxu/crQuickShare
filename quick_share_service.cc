@@ -39,6 +39,12 @@ constexpr size_t kMaxRecord = 1024 * 1024;
 constexpr size_t kChunk = 64 * 1024;
 constexpr int64_t kMaxTotal = kMaxTransferBytes;
 constexpr size_t kMaxFiles = kMaxTransferFiles;
+Failure ConnectionFailure(std::string_view error) {
+  // The bootstrap bridge prefixes local Bluetooth setup errors. Match the
+  // specific BlueZ conflict without treating other connection failures as busy.
+  return error == "Bluetooth connection failed: UUID already registered" ?
+      Failure::kBluetoothServiceInUse : Failure::kConnection;
+}
 int64_t PayloadId() { return base::RandUint64() & INT64_MAX; }
 nc::OfflineFrame Frame(nc::V1Frame::FrameType type) {
   nc::OfflineFrame f; f.set_version(nc::OfflineFrame::V1); f.mutable_v1()->set_type(type); return f;
@@ -949,7 +955,7 @@ struct QuickShareService::Impl::Session {
       if (!setup.connected) {
         if (owner.stop || owner.cancel) return false;
         timed_out = setup.timed_out;
-        return Fail(setup.error, Failure::kConnection);
+        return Fail(setup.error, ConnectionFailure(setup.error));
       }
     }
     handshake_deadline = base::TimeTicks::Now() + base::Seconds(15);
@@ -1008,7 +1014,7 @@ struct QuickShareService::Impl::Session {
       const auto setup_error = channel->connection_error();
       if (!setup_error.empty()) {
         Stage("bluetooth_connect");
-        return Fail(setup_error, Failure::kConnection);
+        return Fail(setup_error, ConnectionFailure(setup_error));
       }
       return Fail("UKEY2 handshake failed");
     }
