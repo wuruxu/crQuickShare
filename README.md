@@ -2,7 +2,7 @@
 
 A native desktop Quick Share implementation built on Chromium 156. It provides
 an account-free LAN sharing app and reusable discovery, protocol, Bluetooth,
-and Wi-Fi upgrade modules for crFiles.
+and Wi-Fi upgrade modules for crFiles and crPhotos.
 
 ## Available apps
 
